@@ -1,0 +1,10 @@
+app.log
+explore.sqlite
+explore.sqlite*
+explore.sqlite-shm
+explore.sqlite-wal
+explore.sqlite-shm
+explore.sqlite-wal
+*.sqlite-shm
+*.sqlite-wal
+explore/app/__pycache__/
