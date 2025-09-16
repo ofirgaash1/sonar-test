@@ -224,6 +224,329 @@ def _sha256_hex(s: str) -> str:
     return hashlib.sha256((s or "").encode('utf-8')).hexdigest()
 
 
+# -----------------------------
+# Small utility/helper routines
+# -----------------------------
+
+def _clamp_neighbors(n: int) -> int:
+    try:
+        n = int(n)
+    except Exception:
+        n = 1
+    if n < 0:
+        return 0
+    if n > 3:
+        return 3
+    return n
+
+
+def _log_info(msg: str) -> None:
+    try:
+        logger.info(msg)
+    except Exception:
+        pass
+
+
+def _check_save_conflict(db: DatabaseService, doc: str, latest: Optional[dict], parent_version, expected_base_sha256: str, text: str):
+    """Return a conflict payload (dict) if the save should be rejected, else None.
+
+    This centralizes the branching logic used to gate concurrent saves.
+    """
+    if not latest:
+        # First version can proceed if parent is None/0.
+        if parent_version not in (None, 0, '0'):
+            return {"reason": "invalid_parent_for_first"}
+        return None
+
+    if parent_version is None:
+        return {"reason": "missing_parent", "latest": latest}
+
+    # When the parent is specified, the client should send expected_base_sha256
+    if not expected_base_sha256:
+        base = _row_for_version(db, doc, int(parent_version)) or {"text": ""}
+        return {
+            "reason": "hash_missing",
+            "latest": latest,
+            "parent": {
+                "version": int(parent_version),
+                "base_sha256": _sha256_hex(base.get('text') or ''),
+                "text": base.get('text') or ''
+            },
+            "diff_parent_to_latest": _diff(base.get('text') or '', latest.get('text') or ''),
+            "diff_parent_to_client": _diff(base.get('text') or '', text or '')
+        }
+
+    if int(parent_version) != int(latest['version']):
+        base = _row_for_version(db, doc, int(parent_version)) or {"text": ""}
+        return {
+            "reason": "version_conflict",
+            "latest": latest,
+            "parent": {
+                "version": int(parent_version),
+                "base_sha256": _sha256_hex(base.get('text') or ''),
+                "text": base.get('text') or ''
+            },
+            "diff_parent_to_latest": _diff(base.get('text') or '', latest.get('text') or ''),
+            "diff_parent_to_client": _diff(base.get('text') or '', text or '')
+        }
+
+    if expected_base_sha256 and expected_base_sha256 != str(latest['base_sha256']):
+        base = _row_for_version(db, doc, int(parent_version)) or {"text": ""}
+        return {
+            "reason": "hash_conflict",
+            "latest": latest,
+            "parent": {
+                "version": int(parent_version),
+                "base_sha256": _sha256_hex(base.get('text') or ''),
+                "text": base.get('text') or ''
+            },
+            "diff_parent_to_latest": _diff(base.get('text') or '', latest.get('text') or ''),
+            "diff_parent_to_client": _diff(base.get('text') or '', text or '')
+        }
+    return None
+
+
+def _prealign_updates(db: DatabaseService, doc: str, latest: Optional[dict], words: list, seg_hint, neighbors: int):
+    """Compute alignment updates for a window around seg_hint using the external aligner.
+
+    Returns a tuple: (updates, token_ops_block). On any failure, returns ([], None).
+    """
+    updates = []
+    token_ops_block = None
+    if not (latest and seg_hint is not None):
+        return updates, token_ops_block
+
+    try:
+        seg_hint = int(seg_hint)
+        neighbors = _clamp_neighbors(neighbors)
+        start_seg = max(0, int(seg_hint) - neighbors)
+        end_seg = int(seg_hint) + neighbors
+        # Gather previous timings to determine clip
+        cur = db.execute(
+            """
+            SELECT segment_index, word_index, word, start_time, end_time, probability
+            FROM transcript_words
+            WHERE file_path=? AND version=? AND segment_index >= ? AND segment_index <= ?
+            ORDER BY word_index ASC
+            """,
+            [doc, int(latest['version']), start_seg, end_seg]
+        )
+        prev_rows = cur.fetchall() or []
+        clip_start = None; clip_end = None
+        for seg_i, wi, w, st, en, pr in prev_rows:
+            if st is not None:
+                clip_start = st if clip_start is None else min(clip_start, float(st))
+            if en is not None:
+                clip_end = en if clip_end is None else max(clip_end, float(en))
+        if clip_start is None or clip_end is None or clip_end <= clip_start:
+            raise RuntimeError('prealign-skip:no-timings')
+
+        # Build new window transcript and mapping of word indices
+        new_window = []  # (global_word_index, word, seg)
+        seg_idx = 0
+        for wi, w in enumerate(words or []):
+            try:
+                t = str(w.get('word') or '')
+            except Exception:
+                t = ''
+            if t == '\n':
+                seg_idx += 1
+                continue
+            if seg_idx >= start_seg and seg_idx <= end_seg:
+                new_window.append((wi, t, seg_idx))
+        new_transcript = ''.join(t for _, t, _ in new_window)
+
+        # Resolve audio (with pointer deref safety)
+        from ..utils import resolve_audio_path
+        audio_path = resolve_audio_path(doc)
+        if not audio_path:
+            raise RuntimeError('prealign-skip:audio-not-found')
+        try:
+            if os.path.isfile(audio_path) and os.path.getsize(audio_path) <= 512:
+                with open(audio_path, 'rb') as _pf:
+                    data = _pf.read(512)
+                import re as _re
+                m = _re.search(r'([A-Fa-f0-9]{40,64})', data.decode('utf-8','ignore'))
+                if m:
+                    sha = m.group(1)
+                    audio_dir = current_app.config.get('AUDIO_DIR')
+                    if audio_dir:
+                        cand = os.path.join(audio_dir, 'blobs', sha)
+                        if os.path.exists(cand):
+                            audio_path = cand
+        except Exception:
+            pass
+
+        # Extract WAV clip via ffmpeg
+        pad = 0.10
+        ss = max(0.0, float(clip_start) - pad)
+        to = float(clip_end) + pad
+        cmd = [
+            'ffmpeg', '-hide_banner', '-loglevel', 'error',
+            '-ss', f'{ss:.3f}', '-to', f'{to:.3f}', '-i', audio_path,
+            '-ac', '1', '-ar', '16000', '-f', 'wav', 'pipe:1'
+        ]
+        _log_info(f"[ALIGN] ffmpeg cmd: {' '.join(cmd)}")
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        wav_bytes = p.stdout
+
+        # Call external alignment endpoint
+        files = { 'audio': ('clip.wav', wav_bytes, 'audio/wav') }
+        data = { 'transcript': new_transcript }
+        r = requests.post(current_app.config.get('ALIGN_ENDPOINT', 'http://silence-remover.com:8000/align'), files=files, data=data, timeout=60)
+        if not r.ok:
+            raise RuntimeError(f'prealign-skip:endpoint {r.status_code}')
+        res = r.json()
+        resp_words = (res or {}).get('words') or []
+        try:
+            _smpl = [(str((w or {}).get('word') or ''), (w or {}).get('start'), (w or {}).get('end')) for w in (resp_words[:10] or [])]
+            _log_info(f"[ALIGN] prealign response: words={len(resp_words)} sample={_smpl}")
+        except Exception:
+            pass
+
+        # Map response words to global times by order of non-space tokens; ensure non-zero durations
+        offset = ss
+        MIN_DUR = 0.20
+
+        def _norm(s):
+            try:
+                return str(s or '').strip()
+            except Exception:
+                return ''
+
+        new_seq = [(i, _norm(t)) for (i, t, _seg) in new_window if _norm(t) != '']
+        resp_seq = [((w or {}), _norm((w or {}).get('word'))) for w in (resp_words or []) if _norm((w or {}).get('word')) != '']
+        m = min(len(new_seq), len(resp_seq))
+        matched = 0
+        for k in range(m):
+            wi, _t = new_seq[k]
+            rw, _rt = resp_seq[k]
+            try:
+                rs = float(rw.get('start') or 0.0) + offset
+            except Exception:
+                rs = offset
+            try:
+                re = float(rw.get('end') or 0.0) + offset
+            except Exception:
+                re = rs
+            if not (re > rs):
+                # Try next response start
+                next_rs = None
+                if (k + 1) < m:
+                    try:
+                        rn = resp_seq[k+1][0]
+                        next_rs = float(rn.get('start') or 0.0) + offset
+                    except Exception:
+                        next_rs = None
+                re = next_rs if (next_rs is not None and next_rs > rs) else (rs + MIN_DUR)
+            updates.append((rs, re, wi))
+            matched += 1
+        _log_info(f"[ALIGN] prealign mapping: new_seq={len(new_seq)} resp_seq={len(resp_seq)} matched={matched} updates={len(updates)}")
+        if matched == 0:
+            raise RuntimeError('prealign-skip:no-match')
+
+        token_ops_block = {
+            'type': 'timing_adjust',
+            'segment_start': start_seg,
+            'segment_end': end_seg,
+            'clip_start': ss,
+            'clip_end': to,
+            'items': [ { 'word_index': wi, 'new_start': s, 'new_end': e } for (s,e,wi) in updates ],
+            'service': 'silence-remover',
+        }
+    except Exception as e:
+        _log_info(f"[ALIGN] prealign skipped: {str(e)}")
+        updates = []
+        token_ops_block = None
+    return updates, token_ops_block
+
+
+def _carry_over_timings(db: DatabaseService, doc: str, latest: Optional[dict], words: list) -> tuple[list, str]:
+    """Carry over timings/probabilities from previous version for unchanged tokens.
+
+    Returns (enriched_words, words_json). If enrichment fails, returns the
+    original words and its JSON serialization.
+    """
+    try:
+        if latest and isinstance(words, list) and words:
+            cur = db.execute(
+                """
+                SELECT word_index, word, start_time, end_time, probability
+                FROM transcript_words
+                WHERE file_path=? AND version=?
+                ORDER BY word_index ASC
+                """,
+                [doc, int(latest['version'])]
+            )
+            prev_rows = cur.fetchall() or []
+            prev_seq = []
+            for wi, w, st, en, pr in prev_rows:
+                try:
+                    prev_seq.append({ 'word': str(w or ''), 'start': st, 'end': en, 'prob': pr })
+                except Exception:
+                    prev_seq.append({ 'word': str(w or ''), 'start': None, 'end': None, 'prob': None })
+            LOOKAHEAD = 64
+            pi = 0
+            enriched = []
+            for w in (words or []):
+                try:
+                    t = str(w.get('word') or '')
+                except Exception:
+                    t = ''
+                if t == '\n':
+                    enriched.append({ 'word': '\n' })
+                    continue
+                s_raw = w.get('start', None)
+                e_raw = w.get('end', None)
+                p_raw = w.get('probability', None)
+
+                def _num(x):
+                    try:
+                        return float(x)
+                    except Exception:
+                        return None
+
+                s_num = _num(s_raw)
+                e_num = _num(e_raw)
+                timings_present = ((e_num is not None and e_num > 0) or (s_num is not None and s_num > 0))
+                try:
+                    p_num = float(p_raw)
+                    prob_present = (p_raw is not None) and (p_num == p_num)  # not NaN
+                except Exception:
+                    p_num = None
+                    prob_present = False
+
+                s_val = s_raw
+                e_val = e_raw
+                p_val = p_raw
+                if not (timings_present and prob_present):
+                    match_j = -1
+                    limit = min(len(prev_seq), pi + LOOKAHEAD)
+                    for j in range(pi, limit):
+                        if str(prev_seq[j]['word'] or '') == t:
+                            match_j = j
+                            break
+                    if match_j >= 0:
+                        pi = match_j + 1
+                        if not timings_present:
+                            s_val = prev_seq[match_j]['start']
+                            e_val = prev_seq[match_j]['end']
+                        if not prob_present:
+                            p_val = prev_seq[match_j]['prob']
+                enriched.append({ 'word': t, **({ 'start': s_val } if s_val is not None else {}), **({ 'end': e_val } if e_val is not None else {}), **({ 'probability': p_val } if p_val is not None else {}) })
+            words = enriched
+    except Exception:
+        # On failure, fall through with the original words
+        pass
+
+    try:
+        words_json = orjson.dumps(words).decode('utf-8')
+    except Exception:
+        # Best-effort serialization
+        words_json = orjson.dumps(words or []).decode('utf-8')
+    return words, words_json
+
+
 def _latest_row(db: DatabaseService, file_path: str) -> Optional[dict]:
     cur = db.execute(
         "SELECT version, base_sha256, text, words, COALESCE(created_by,'') FROM transcripts WHERE file_path=? ORDER BY version DESC LIMIT 1",
@@ -368,9 +691,7 @@ def save_version():
     text = str(body.get('text') or '')
     words = body.get('words', [])
     seg_hint = body.get('segment', None)
-    neighbors = int(body.get('neighbors', 1) or 1)
-    if neighbors < 0: neighbors = 0
-    if neighbors > 3: neighbors = 3
+    neighbors = _clamp_neighbors(body.get('neighbors', 1) or 1)
     if not doc:
         abort(400, 'missing doc')
     if not isinstance(words, list):
@@ -379,46 +700,12 @@ def save_version():
     db = _db(); _ensure_schema(db)
     latest = _latest_row(db, doc)
 
-    # Concurrency/consistency gate: parent version and hash must match current latest
-    if latest:
-        conflict_payload = None
-        if parent_version is None:
-            conflict_payload = {"reason": "missing_parent", "latest": latest}
-        elif not expected_base_sha256:
-            # Require client to send expected_base_sha256 for non-first saves
-            base = _row_for_version(db, doc, int(parent_version)) or {"text": ""}
-            conflict_payload = {
-                "reason": "hash_missing",
-                "latest": latest,
-                "parent": {"version": int(parent_version), "base_sha256": _sha256_hex(base.get('text') or ''), "text": base.get('text') or ''},
-                "diff_parent_to_latest": _diff(base.get('text') or '', latest.get('text') or ''),
-                "diff_parent_to_client": _diff(base.get('text') or '', text or '')
-            }
-        elif int(parent_version) != int(latest['version']):
-            # Provide helpful diffs for client 3-way merge UI: base->latest and base->client
-            base = _row_for_version(db, doc, int(parent_version)) or {"text": ""}
-            conflict_payload = {
-                "reason": "version_conflict",
-                "latest": latest,
-                "parent": {"version": int(parent_version), "base_sha256": _sha256_hex(base.get('text') or ''), "text": base.get('text') or ''},
-                "diff_parent_to_latest": _diff(base.get('text') or '', latest.get('text') or ''),
-                "diff_parent_to_client": _diff(base.get('text') or '', text or '')
-            }
-        elif expected_base_sha256 and expected_base_sha256 != str(latest['base_sha256']):
-            base = _row_for_version(db, doc, int(parent_version)) or {"text": ""}
-            conflict_payload = {
-                "reason": "hash_conflict",
-                "latest": latest,
-                "parent": {"version": int(parent_version), "base_sha256": _sha256_hex(base.get('text') or ''), "text": base.get('text') or ''},
-                "diff_parent_to_latest": _diff(base.get('text') or '', latest.get('text') or ''),
-                "diff_parent_to_client": _diff(base.get('text') or '', text or '')
-            }
-        if conflict_payload is not None:
-            return (jsonify(conflict_payload), 409)
-    else:
-        # first version
-        if parent_version not in (None, 0, '0'):
+    # Concurrency/consistency gate
+    conflict_payload = _check_save_conflict(db, doc, latest, parent_version, expected_base_sha256, text)
+    if conflict_payload is not None:
+        if conflict_payload.get('reason') == 'invalid_parent_for_first':
             return ("invalid parentVersion for first save", 400)
+        return (jsonify(conflict_payload), 409)
 
     # Compute new version + hash of new text
     new_version = (latest['version'] + 1) if latest else 1
@@ -439,243 +726,8 @@ def save_version():
     except Exception:
         pass
 
-    # Attempt alignment BEFORE saving (atomic):
-    # Derive window from previous version timings if available
-    updates = []  # (start_time, end_time, file_path, version, word_index)
-    token_ops_block = None
-    if latest and seg_hint is not None:
-        try:
-            seg_hint = int(seg_hint)
-            start_seg = max(0, int(seg_hint) - max(0, neighbors))
-            end_seg = int(seg_hint) + max(0, neighbors)
-            # Gather previous timings to determine clip
-            cur = db.execute(
-                """
-                SELECT segment_index, word_index, word, start_time, end_time, probability
-                FROM transcript_words
-                WHERE file_path=? AND version=? AND segment_index >= ? AND segment_index <= ?
-                ORDER BY word_index ASC
-                """,
-                [doc, int(latest['version']), start_seg, end_seg]
-            )
-            prev_rows = cur.fetchall() or []
-            clip_start = None; clip_end = None
-            for seg_i, wi, w, st, en, pr in prev_rows:
-                if st is not None:
-                    clip_start = st if clip_start is None else min(clip_start, float(st))
-                if en is not None:
-                    clip_end = en if clip_end is None else max(clip_end, float(en))
-            if clip_start is None or clip_end is None or clip_end <= clip_start:
-                # Skip pre-align when no timings exist in the previous window
-                clip_start = None; clip_end = None
-                updates = []
-                token_ops_block = None
-                raise RuntimeError('prealign-skip:no-timings')
-            # Build new window transcript and mapping of word indices
-            new_window = []  # (global_word_index, word, seg)
-            seg_idx = 0
-            for wi, w in enumerate(words or []):
-                try:
-                    t = str(w.get('word') or '')
-                except Exception:
-                    t = ''
-                if t == '\n':
-                    seg_idx += 1
-                    continue
-                if seg_idx >= start_seg and seg_idx <= end_seg:
-                    new_window.append((wi, t, seg_idx))
-            new_transcript = ''.join(t for _, t, _ in new_window)
-            # Resolve audio
-            from ..utils import resolve_audio_path
-            audio_path = resolve_audio_path(doc)
-            if not audio_path:
-                # Skip pre-align if audio is missing; allow save to proceed
-                updates = []
-                token_ops_block = None
-                raise RuntimeError('prealign-skip:audio-not-found')
-            # Pointer deref safety
-            try:
-                if os.path.isfile(audio_path) and os.path.getsize(audio_path) <= 512:
-                    with open(audio_path, 'rb') as _pf:
-                        data = _pf.read(512)
-                    import re as _re
-                    m = _re.search(r'([A-Fa-f0-9]{40,64})', data.decode('utf-8','ignore'))
-                    if m:
-                        sha = m.group(1)
-                        audio_dir = current_app.config.get('AUDIO_DIR')
-                        if audio_dir:
-                            cand = os.path.join(audio_dir, 'blobs', sha)
-                            if os.path.exists(cand):
-                                audio_path = cand
-            except Exception:
-                pass
-            # Extract clip
-            pad = 0.10
-            ss = max(0.0, float(clip_start) - pad)
-            to = float(clip_end) + pad
-            cmd = [
-                'ffmpeg', '-hide_banner', '-loglevel', 'error',
-                '-ss', f'{ss:.3f}', '-to', f'{to:.3f}', '-i', audio_path,
-                '-ac', '1', '-ar', '16000', '-f', 'wav', 'pipe:1'
-            ]
-            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            wav_bytes = p.stdout
-            # Align
-            files = { 'audio': ('clip.wav', wav_bytes, 'audio/wav') }
-            data = { 'transcript': new_transcript }
-            r = requests.post(current_app.config.get('ALIGN_ENDPOINT', 'http://silence-remover.com:8000/align'), files=files, data=data, timeout=60)
-            if not r.ok:
-                # Skip pre-align on endpoint error; allow save to proceed
-                updates = []
-                token_ops_block = None
-                raise RuntimeError(f'prealign-skip:endpoint {r.status_code}')
-            res = r.json()
-            resp_words = (res or {}).get('words') or []
-            try:
-                _smpl = [(str((w or {}).get('word') or ''), (w or {}).get('start'), (w or {}).get('end')) for w in (resp_words[:10] or [])]
-                logger.info(f"[ALIGN] prealign response: words={len(resp_words)} sample={_smpl}")
-            except Exception:
-                pass
-            # Map by order of non-whitespace tokens; ensure non-zero durations
-            offset = ss
-            matched = 0
-            MIN_DUR = 0.20
-            def _norm(s):
-                try:
-                    return str(s or '').strip()
-                except Exception:
-                    return ''
-            new_seq = [(i, _norm(t)) for (i, t, _seg) in new_window if _norm(t) != '']
-            resp_seq = [((w or {}), _norm((w or {}).get('word'))) for w in (resp_words or []) if _norm((w or {}).get('word')) != '']
-            m = min(len(new_seq), len(resp_seq))
-            for k in range(m):
-                wi, _t = new_seq[k]
-                rw, _rt = resp_seq[k]
-                try:
-                    rs = float(rw.get('start') or 0.0) + offset
-                except Exception:
-                    rs = offset
-                try:
-                    re = float(rw.get('end') or 0.0) + offset
-                except Exception:
-                    re = rs
-                if not (re > rs):
-                    # Try next response start
-                    next_rs = None
-                    if (k + 1) < m:
-                        try:
-                            rn = resp_seq[k+1][0]
-                            next_rs = float(rn.get('start') or 0.0) + offset
-                        except Exception:
-                            next_rs = None
-                    re = next_rs if (next_rs is not None and next_rs > rs) else (rs + MIN_DUR)
-                updates.append((rs, re, wi))
-                matched += 1
-            try:
-                logger.info(f"[ALIGN] prealign mapping: new_seq={len(new_seq)} resp_seq={len(resp_seq)} matched={matched} updates={len(updates)}")
-            except Exception:
-                pass
-            if matched == 0:
-                # No token matched; skip pre-align
-                updates = []
-                token_ops_block = None
-                raise RuntimeError('prealign-skip:no-match')
-            # Prepare token_ops block
-            token_ops_block = {
-                'type': 'timing_adjust',
-                'segment_start': start_seg,
-                'segment_end': end_seg,
-                'clip_start': ss,
-                'clip_end': to,
-                'items': [ { 'word_index': wi, 'new_start': s, 'new_end': e } for (s,e,wi) in updates ],
-                'service': 'silence-remover',
-            }
-        except Exception as e:
-            # Any pre-align failure should not block saving the version; continue gracefully
-            try:
-                logger.info(f"[ALIGN] prealign skipped: {str(e)}")
-            except Exception:
-                pass
-            updates = []
-            token_ops_block = None
-
-    # Carry over timings/probabilities from previous version for unchanged tokens
-    try:
-        if latest and isinstance(words, list) and words:
-            cur = db.execute(
-                """
-                SELECT word_index, word, start_time, end_time, probability
-                FROM transcript_words
-                WHERE file_path=? AND version=?
-                ORDER BY word_index ASC
-                """,
-                [doc, int(latest['version'])]
-            )
-            prev_rows = cur.fetchall() or []
-            prev_seq = []  # list of dicts without newlines (since DB doesn't store them)
-            for wi, w, st, en, pr in prev_rows:
-                try:
-                    prev_seq.append({ 'word': str(w or ''), 'start': st, 'end': en, 'prob': pr })
-                except Exception:
-                    prev_seq.append({ 'word': str(w or ''), 'start': None, 'end': None, 'prob': None })
-            # two-pointer scan with small lookahead to find matches in order
-            LOOKAHEAD = 64
-            pi = 0
-            enriched = []
-            for w in (words or []):
-                try:
-                    t = str(w.get('word') or '')
-                except Exception:
-                    t = ''
-                if t == '\n':
-                    enriched.append({ 'word': '\n' })
-                    continue
-                # determine if current word already has usable timings/probability
-                s_raw = w.get('start', None)
-                e_raw = w.get('end', None)
-                p_raw = w.get('probability', None)
-                def _num(x):
-                    try:
-                        return float(x)
-                    except Exception:
-                        return None
-                s_num = _num(s_raw)
-                e_num = _num(e_raw)
-                # consider timings present only when either start or end is a positive number, or end >= start and end > 0
-                timings_present = ((e_num is not None and e_num > 0) or (s_num is not None and s_num > 0))
-                prob_present = False
-                try:
-                    p_num = float(p_raw)
-                    prob_present = (p_raw is not None) and (p_num == p_num)  # not NaN
-                except Exception:
-                    p_num = None
-                    prob_present = False
-                s_val = s_raw
-                e_val = e_raw
-                p_val = p_raw
-                if not (timings_present and prob_present):
-                    match_j = -1
-                    limit = min(len(prev_seq), pi + LOOKAHEAD)
-                    for j in range(pi, limit):
-                        if str(prev_seq[j]['word'] or '') == t:
-                            match_j = j
-                            break
-                    if match_j >= 0:
-                        pi = match_j + 1
-                        if not timings_present:
-                            s_val = prev_seq[match_j]['start']
-                            e_val = prev_seq[match_j]['end']
-                        if not prob_present:
-                            p_val = prev_seq[match_j]['prob']
-                enriched.append({ 'word': t, **({ 'start': s_val } if s_val is not None else {}), **({ 'end': e_val } if e_val is not None else {}), **({ 'probability': p_val } if p_val is not None else {}) })
-            words = enriched
-            try:
-                words_json = orjson.dumps(words).decode('utf-8')
-            except Exception:
-                pass
-    except Exception:
-        # If carry-over fails, fall back to client-provided words
-        pass
+    updates, token_ops_block = _prealign_updates(db, doc, latest, words, seg_hint, neighbors)
+    words, words_json = _carry_over_timings(db, doc, latest, words)
 
     # Begin transaction
     db.execute("BEGIN TRANSACTION")
