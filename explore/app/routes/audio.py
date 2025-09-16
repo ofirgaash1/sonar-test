@@ -23,6 +23,117 @@ def _win_long_path(p: str) -> str:
     return p
 
 
+def _first_openable_path(candidates: list[str]) -> Optional[str]:
+    for c in candidates:
+        try:
+            with open(c, 'rb'):
+                return c
+        except Exception:
+            continue
+    return None
+
+
+def _file_size(p: str) -> Optional[int]:
+    try:
+        with open(p, 'rb') as fh:
+            fh.seek(0, os.SEEK_END)
+            return fh.tell()
+    except Exception:
+        try:
+            return os.path.getsize(p)
+        except Exception:
+            return None
+
+
+def _maybe_follow_pointer(fs_path: str) -> tuple[str, Optional[int]]:
+    """If `fs_path` looks like a tiny pointer file, try to follow to blob target.
+
+    Returns (resolved_path, size) where size is the updated file size if found.
+    """
+    size = _file_size(fs_path)
+    try:
+        if size is not None and size <= 512:
+            with open(fs_path, 'rb') as _pf:
+                data = _pf.read(512)
+            # best-effort decodes
+            text = ''
+            for enc in ('utf-8','utf-16','utf-16-le','utf-16-be','latin-1'):
+                try:
+                    text = data.decode(enc, 'ignore').strip()
+                except Exception:
+                    text = ''
+                if text:
+                    break
+            if text:
+                import re as _re
+                m = _re.search(r'([A-Fa-f0-9]{40,64})', text)
+                if m:
+                    sha = m.group(1)
+                    audio_dir = current_app.config.get('AUDIO_DIR')
+                    if audio_dir:
+                        cand = os.path.join(audio_dir, 'blobs', sha)
+                        if os.path.exists(cand):
+                            fs_path = cand
+                            size = _file_size(fs_path)
+    except Exception:
+        pass
+    return fs_path, size
+
+
+def _content_type_for(name_for_type: str) -> str:
+    ct = mimetypes.guess_type(name_for_type)[0] or 'application/octet-stream'
+    try:
+        if (name_for_type or '').lower().endswith('.opus'):
+            # Use a broadly compatible type for Opus-in-Ogg
+            ct = 'audio/ogg; codecs=opus'
+    except Exception:
+        pass
+    return ct
+
+
+def _parse_range_header(range_header: str, size: int) -> Optional[tuple[int, int]]:
+    """Parse a bytes Range header and clamp to file size.
+
+    Returns (start, end) if valid, otherwise None for unsatisfiable.
+    """
+    m = re.search(r'bytes=(\d+)-(\d*)', range_header or '')
+    if not m:
+        return None
+    byte1 = int(m.group(1))
+    byte2 = int(m.group(2)) if m.group(2) else (size - 1)
+    if byte1 >= size:
+        return None
+    if byte2 >= size:
+        byte2 = size - 1
+    if byte2 < byte1:
+        byte2 = byte1
+    return byte1, byte2
+
+
+def _chunk_gen(fs_path: str, start_end: Optional[tuple[int,int]], request_id: Optional[str], size: int):
+    chunk_size = 8192
+    with open(fs_path, 'rb') as f:
+        if start_end is not None:
+            byte1, byte2 = start_end
+            if request_id:
+                logger.info(f"[TIMING] [REQ:{request_id}] Serving range request: bytes {byte1}-{byte2}/{size}")
+            f.seek(byte1)
+            remaining = (byte2 - byte1 + 1)
+            while remaining > 0:
+                chunk = f.read(min(chunk_size, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+            return
+        # Full file
+        if request_id:
+            logger.info(f"[TIMING] [REQ:{request_id}] Serving full file: {size} bytes")
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
 def send_range_file(path, request_id=None, requested_name=None):
     start_time = time.time()
     if request_id:
@@ -32,17 +143,7 @@ def send_range_file(path, request_id=None, requested_name=None):
     # Resolve a usable filesystem path by trying long-path and plain variants.
     long_variant = _win_long_path(path)
     plain_variant = os.path.abspath(path)
-    fs_path = None
-    for candidate in [long_variant, plain_variant]:
-        try:
-            with open(candidate, 'rb'):
-                pass
-            fs_path = candidate
-            if request_id:
-                logger.info(f"[TIMING] [REQ:{request_id}] Using path variant: {candidate}")
-            break
-        except Exception:
-            continue
+    fs_path = _first_openable_path([long_variant, plain_variant])
     if not fs_path:
         if request_id:
             logger.error(
@@ -51,144 +152,47 @@ def send_range_file(path, request_id=None, requested_name=None):
         return "File not found", 404
 
     # Determine file size using a robust method
-    try:
-        with open(fs_path, 'rb') as _f_sz:
-            _f_sz.seek(0, os.SEEK_END)
-            size = _f_sz.tell()
-    except Exception:
-        try:
-            size = os.path.getsize(fs_path)
-        except Exception:
-            if request_id:
-                logger.error(f"[TIMING] [REQ:{request_id}] Unable to determine file size for: {fs_path}")
-            return "File not found", 404
+    size = _file_size(fs_path)
+    if size is None:
+        if request_id:
+            logger.error(f"[TIMING] [REQ:{request_id}] Unable to determine file size for: {fs_path}")
+        return "File not found", 404
 
     # If this is a tiny text pointer, follow to blob target (safety net even if resolver missed it)
-    try:
-        if size <= 512:
-            with open(fs_path, 'rb') as _pf:
-                data = _pf.read(512)
-            # best-effort decodes
-            for enc in ('utf-8','utf-16','utf-16-le','utf-16-be','latin-1'):
-                try:
-                    text = data.decode(enc, 'ignore').strip()
-                except Exception:
-                    text = ''
-                if not text:
-                    continue
-                if 'blobs' in text or 'oid sha256:' in text or (len(text) >= 40 and all(ch in '0123456789abcdefABCDEF' for ch in text.strip().split('/')[-1])):
-                    # Try mapping to <AUDIO_DIR>/blobs/<sha>
-                    sha = None
-                    import re as _re
-                    m = _re.search(r'([A-Fa-f0-9]{40,64})', text)
-                    if m:
-                        sha = m.group(1)
-                    if sha:
-                        audio_dir = current_app.config.get('AUDIO_DIR')
-                        if audio_dir:
-                            cand = os.path.join(audio_dir, 'blobs', sha)
-                            if os.path.exists(cand):
-                                fs_path = cand
-                                # refresh size
-                                try:
-                                    with open(fs_path, 'rb') as _f_sz2:
-                                        _f_sz2.seek(0, os.SEEK_END)
-                                        size = _f_sz2.tell()
-                                except Exception:
-                                    size = os.path.getsize(fs_path)
-                                if request_id:
-                                    logger.info(f"[TIMING] [REQ:{request_id}] Pointer file redirected to blob: {fs_path}")
-                                break
-            # Fallthrough: if not redirected, continue with tiny file (will be unplayable)
-    except Exception:
-        pass
+    fs_path, size = _maybe_follow_pointer(fs_path)
+
     # Determine content type using the requested name if available (handles blob targets)
     name_for_type = requested_name or path
-    content_type = mimetypes.guess_type(name_for_type)[0] or 'application/octet-stream'
-    try:
-        if (name_for_type or '').lower().endswith('.opus'):
-            # Use a broadly compatible type for Opus-in-Ogg
-            content_type = 'audio/ogg; codecs=opus'
-    except Exception:
-        pass
+    content_type = _content_type_for(name_for_type)
 
-    def generate_chunks():
-        chunk_size = 8192  # 8KB chunks
-        with open(fs_path, 'rb') as f:
-            if range_header:
-                # Example Range: bytes=12345-
-                byte1, byte2 = 0, None
-                m = re.search(r'bytes=(\d+)-(\d*)', range_header)
-                if m:
-                    byte1 = int(m.group(1))
-                    if m.group(2):
-                        byte2 = int(m.group(2))
-                if byte2 is None:
-                    byte2 = size - 1
-                length = byte2 - byte1 + 1
-                
-                if request_id:
-                    logger.info(f"[TIMING] [REQ:{request_id}] Serving range request: bytes {byte1}-{byte2}/{size}")
-                
-                f.seek(byte1)
-                remaining = length
-                while remaining > 0:
-                    chunk = f.read(min(chunk_size, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    yield chunk
-            else:
-                if request_id:
-                    logger.info(f"[TIMING] [REQ:{request_id}] Serving full file: {size} bytes")
-                
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                    yield chunk
-
-    if range_header:
-        m = re.search(r'bytes=(\d+)-(\d*)', range_header)
-        if m:
-            byte1 = int(m.group(1))
-            # If client specified end, clamp to EOF; otherwise default to EOF
-            if m.group(2):
-                byte2 = int(m.group(2))
-            else:
-                byte2 = size - 1
-            # Handle invalid/oversized ranges
-            if byte1 >= size:
-                # 416 Range Not Satisfiable
-                resp = Response(status=416)
-                resp.headers.add('Content-Range', f'bytes */{size}')
-                return resp
-            if byte2 >= size:
-                byte2 = size - 1
-            if byte2 < byte1:
-                byte2 = byte1
-            length = byte2 - byte1 + 1
-            
-            resp = Response(generate_chunks(), 206, mimetype=content_type)
-            resp.headers.add('Content-Range', f'bytes {byte1}-{byte2}/{size}')
-            resp.headers.add('Accept-Ranges', 'bytes')
-            resp.headers.add('Content-Length', str(length))
-            
-            if request_id:
-                duration_ms = (time.time() - start_time) * 1000
-                logger.info(f"[TIMING] [REQ:{request_id}] Range file served in {duration_ms:.2f}ms")
-            
-            return resp
+    # Prepare range if requested
+    start_end = _parse_range_header(range_header or '', int(size)) if size is not None else None
+    if range_header and start_end is None:
+        # 416 Range Not Satisfiable
+        resp = Response(status=416)
+        resp.headers.add('Content-Range', f'bytes */{size}')
+        return resp
+    if start_end is not None:
+        byte1, byte2 = start_end
+        length = byte2 - byte1 + 1
+        resp = Response(_chunk_gen(fs_path, start_end, request_id, int(size)), 206, mimetype=content_type)
+        resp.headers.add('Content-Range', f'bytes {byte1}-{byte2}/{size}')
+        resp.headers.add('Accept-Ranges', 'bytes')
+        resp.headers.add('Content-Length', str(length))
+        if request_id:
+            duration_ms = (time.time() - start_time) * 1000
+            logger.info(f"[TIMING] [REQ:{request_id}] Range file served in {duration_ms:.2f}ms")
+        return resp
 
     # No Range: return full file
-    resp = Response(generate_chunks(), 200, mimetype=content_type)
+    resp = Response(_chunk_gen(fs_path, None, request_id, int(size)), 200, mimetype=content_type)
     resp.headers.add('Accept-Ranges', 'bytes')
     resp.headers.add('Content-Length', str(size))
-    
+
     if request_id:
         duration_ms = (time.time() - start_time) * 1000
         logger.info(f"[TIMING] [REQ:{request_id}] Full file served in {duration_ms:.2f}ms")
-    
+
     return resp
 
 @bp.route('/audio/<path:filename>')

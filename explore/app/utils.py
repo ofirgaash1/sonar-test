@@ -98,22 +98,26 @@ def resolve_audio_path(source: str) -> Optional[str]:
 
     try:
         idx: Dict[str, str] = (current_app.config or {}).get('AUDIO_INDEX') or {}
+        def _finalize(pth: str) -> Optional[str]:
+            rp = _resolve_link_if_needed(pth)
+            if not rp:
+                return None
+            try:
+                if os.path.isfile(rp):
+                    ptr = _maybe_pointer_to_blob(rp)
+                    if ptr:
+                        return ptr
+            except Exception:
+                pass
+            return rp
+
         if idx:
             key = '/'.join([_norm_text(rel[0]), _norm_text(rel[-1])]) if len(rel) >= 2 else _norm_text(decoded)
             p = idx.get(key)
             if p:
-                rp = _resolve_link_if_needed(p)
-                if rp:
-                    # If entry is a small pointer file, follow to blob target
-                    try:
-                        ptr = None
-                        if os.path.isfile(rp):
-                            ptr = _maybe_pointer_to_blob(rp)
-                        if ptr:
-                            return ptr
-                    except Exception:
-                        pass
-                    return rp
+                fin = _finalize(p)
+                if fin:
+                    return fin
             # Fallback: match by filename only if unique
             try:
                 fname_norm = _norm_text(rel[-1]) if rel else ''
@@ -123,17 +127,9 @@ def resolve_audio_path(source: str) -> Optional[str]:
                     if len(c_keys) == 1:
                         p = idx.get(c_keys[0])
                         if p:
-                            rp = _resolve_link_if_needed(p)
-                            if rp:
-                                try:
-                                    ptr = None
-                                    if os.path.isfile(rp):
-                                        ptr = _maybe_pointer_to_blob(rp)
-                                    if ptr:
-                                        return ptr
-                                except Exception:
-                                    pass
-                                return rp
+                            fin = _finalize(p)
+                            if fin:
+                                return fin
                 # 2) endswith raw (pre-normalized) filename from source
                 fname_raw = rel[-1] if rel else ''
                 if fname_raw and fname_raw != fname_norm:
@@ -141,17 +137,9 @@ def resolve_audio_path(source: str) -> Optional[str]:
                     if len(c_raw) == 1:
                         p = idx.get(c_raw[0])
                         if p:
-                            rp = _resolve_link_if_needed(p)
-                            if rp:
-                                try:
-                                    ptr = None
-                                    if os.path.isfile(rp):
-                                        ptr = _maybe_pointer_to_blob(rp)
-                                    if ptr:
-                                        return ptr
-                                except Exception:
-                                    pass
-                                return rp
+                            fin = _finalize(p)
+                            if fin:
+                                return fin
                 # 3) compare filename sans extension (case-insensitive)
                 import os as _os
                 base = _os.path.splitext(fname_norm)[0].lower()
@@ -159,9 +147,9 @@ def resolve_audio_path(source: str) -> Optional[str]:
                 if len(c2_keys) == 1:
                     p = idx.get(c2_keys[0])
                     if p:
-                        rp = _resolve_link_if_needed(p)
-                        if rp:
-                            return rp
+                        fin = _finalize(p)
+                        if fin:
+                            return fin
             except Exception:
                 pass
     except Exception:
@@ -265,9 +253,9 @@ def resolve_audio_path(source: str) -> Optional[str]:
                             return cand
                         sha = os.path.basename(target)
                         blob = os.path.join(audio_dir, 'blobs', sha)
-                    if os.path.exists(blob):
-                        return blob
-                    # Pointer file fallback
+                        if os.path.exists(blob):
+                            return blob
+                    # Pointer file fallback (or regular file)
                     ptr = _maybe_pointer_to_blob(m)
                     if ptr:
                         return ptr

@@ -247,6 +247,123 @@ def _log_info(msg: str) -> None:
         pass
 
 
+def _maybe_deref_audio_pointer(audio_path: str) -> str:
+    """If `audio_path` is a tiny pointer file, try to dereference to blobs/<sha>.
+    Returns the best path (original if no change).
+    """
+    try:
+        if os.path.isfile(audio_path) and os.path.getsize(audio_path) <= 512:
+            with open(audio_path, 'rb') as _pf:
+                data = _pf.read(512)
+            import re as _re
+            m = _re.search(r'([A-Fa-f0-9]{40,64})', data.decode('utf-8','ignore'))
+            if m:
+                sha = m.group(1)
+                audio_dir = current_app.config.get('AUDIO_DIR')
+                if audio_dir:
+                    cand = os.path.join(audio_dir, 'blobs', sha)
+                    if os.path.exists(cand):
+                        return cand
+    except Exception:
+        pass
+    return audio_path
+
+
+def _ffmpeg_extract_wav_clip(audio_path: str, clip_start: float, clip_end: float, pad: float = 0.10) -> tuple[bytes, float, float]:
+    """Extract a mono 16k wav clip using ffmpeg; returns (bytes, ss, to)."""
+    ss = max(0.0, float(clip_start) - pad)
+    to = float(clip_end) + pad
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error',
+        '-ss', f'{ss:.3f}', '-to', f'{to:.3f}', '-i', audio_path,
+        '-ac', '1', '-ar', '16000', '-f', 'wav', 'pipe:1'
+    ]
+    _log_info(f"[ALIGN] ffmpeg cmd: {' '.join(cmd)}")
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    return p.stdout, ss, to
+
+
+def _align_call(wav_bytes: bytes, transcript: str) -> list:
+    files = { 'audio': ('clip.wav', wav_bytes, 'audio/wav') }
+    data = { 'transcript': transcript }
+    r = requests.post(current_app.config.get('ALIGN_ENDPOINT', 'http://silence-remover.com:8000/align'), files=files, data=data, timeout=60)
+    if not r.ok:
+        raise RuntimeError(f'align-endpoint {r.status_code}')
+    res = r.json() or {}
+    words = res.get('words') or []
+    try:
+        smpl = [(str((w or {}).get('word') or ''), (w or {}).get('start'), (w or {}).get('end')) for w in (words[:10] or [])]
+        _log_info(f"[ALIGN] response: words={len(words)} sample={smpl}")
+    except Exception:
+        pass
+    return words
+
+
+def _build_new_window(words: list, start_seg: int, end_seg: int) -> tuple[list[tuple[int, str, int]], str]:
+    seg_idx = 0
+    new_window = []
+    for wi, w in enumerate(words or []):
+        try:
+            t = str(w.get('word') or '')
+        except Exception:
+            t = ''
+        if t == '\n':
+            seg_idx += 1
+            continue
+        if seg_idx >= start_seg and seg_idx <= end_seg:
+            new_window.append((wi, t, seg_idx))
+    new_transcript = ''.join(t for _, t, _ in new_window)
+    return new_window, new_transcript
+
+
+def _map_aligned_to_updates(new_window: list[tuple[int,str,int]], resp_words: list, offset: float, min_dur: float = 0.20) -> tuple[list[tuple[float,float,int]], int]:
+    def _norm(s):
+        try:
+            return str(s or '').strip()
+        except Exception:
+            return ''
+    new_seq = [(i, _norm(t)) for (i, t, _seg) in new_window if _norm(t) != '']
+    resp_seq = [((w or {}), _norm((w or {}).get('word'))) for w in (resp_words or []) if _norm((w or {}).get('word')) != '']
+    m = min(len(new_seq), len(resp_seq))
+    updates = []
+    matched = 0
+    for k in range(m):
+        wi, _t = new_seq[k]
+        rw, _rt = resp_seq[k]
+        try:
+            rs = float(rw.get('start') or 0.0) + offset
+        except Exception:
+            rs = offset
+        try:
+            re = float(rw.get('end') or 0.0) + offset
+        except Exception:
+            re = rs
+        if not (re > rs):
+            next_rs = None
+            if (k + 1) < m:
+                try:
+                    rn = resp_seq[k+1][0]
+                    next_rs = float(rn.get('start') or 0.0) + offset
+                except Exception:
+                    next_rs = None
+            re = next_rs if (next_rs is not None and next_rs > rs) else (rs + float(min_dur))
+        updates.append((rs, re, wi))
+        matched += 1
+    return updates, matched
+
+
+def _compute_clip_from_prev_rows(prev_rows) -> tuple[Optional[float], Optional[float]]:
+    clip_start = None; clip_end = None
+    for _seg_i, _wi, _w, st, en, _pr in (prev_rows or []):
+        if st is not None:
+            clip_start = st if clip_start is None else min(clip_start, float(st))
+        if en is not None:
+            clip_end = en if clip_end is None else max(clip_end, float(en))
+    if clip_start is None or clip_end is None or clip_end <= clip_start:
+        return None, None
+    return float(clip_start), float(clip_end)
+
+
 def _check_save_conflict(db: DatabaseService, doc: str, latest: Optional[dict], parent_version, expected_base_sha256: str, text: str):
     """Return a conflict payload (dict) if the save should be rejected, else None.
 
@@ -332,116 +449,27 @@ def _prealign_updates(db: DatabaseService, doc: str, latest: Optional[dict], wor
             [doc, int(latest['version']), start_seg, end_seg]
         )
         prev_rows = cur.fetchall() or []
-        clip_start = None; clip_end = None
-        for seg_i, wi, w, st, en, pr in prev_rows:
-            if st is not None:
-                clip_start = st if clip_start is None else min(clip_start, float(st))
-            if en is not None:
-                clip_end = en if clip_end is None else max(clip_end, float(en))
-        if clip_start is None or clip_end is None or clip_end <= clip_start:
+        clip_start, clip_end = _compute_clip_from_prev_rows(prev_rows)
+        if clip_start is None or clip_end is None:
             raise RuntimeError('prealign-skip:no-timings')
 
         # Build new window transcript and mapping of word indices
-        new_window = []  # (global_word_index, word, seg)
-        seg_idx = 0
-        for wi, w in enumerate(words or []):
-            try:
-                t = str(w.get('word') or '')
-            except Exception:
-                t = ''
-            if t == '\n':
-                seg_idx += 1
-                continue
-            if seg_idx >= start_seg and seg_idx <= end_seg:
-                new_window.append((wi, t, seg_idx))
-        new_transcript = ''.join(t for _, t, _ in new_window)
+        new_window, new_transcript = _build_new_window(words, start_seg, end_seg)
 
         # Resolve audio (with pointer deref safety)
         from ..utils import resolve_audio_path
         audio_path = resolve_audio_path(doc)
         if not audio_path:
             raise RuntimeError('prealign-skip:audio-not-found')
-        try:
-            if os.path.isfile(audio_path) and os.path.getsize(audio_path) <= 512:
-                with open(audio_path, 'rb') as _pf:
-                    data = _pf.read(512)
-                import re as _re
-                m = _re.search(r'([A-Fa-f0-9]{40,64})', data.decode('utf-8','ignore'))
-                if m:
-                    sha = m.group(1)
-                    audio_dir = current_app.config.get('AUDIO_DIR')
-                    if audio_dir:
-                        cand = os.path.join(audio_dir, 'blobs', sha)
-                        if os.path.exists(cand):
-                            audio_path = cand
-        except Exception:
-            pass
+        audio_path = _maybe_deref_audio_pointer(audio_path)
 
-        # Extract WAV clip via ffmpeg
-        pad = 0.10
-        ss = max(0.0, float(clip_start) - pad)
-        to = float(clip_end) + pad
-        cmd = [
-            'ffmpeg', '-hide_banner', '-loglevel', 'error',
-            '-ss', f'{ss:.3f}', '-to', f'{to:.3f}', '-i', audio_path,
-            '-ac', '1', '-ar', '16000', '-f', 'wav', 'pipe:1'
-        ]
-        _log_info(f"[ALIGN] ffmpeg cmd: {' '.join(cmd)}")
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        wav_bytes = p.stdout
+        # Extract WAV clip via ffmpeg and call endpoint
+        wav_bytes, ss, to = _ffmpeg_extract_wav_clip(audio_path, clip_start, clip_end, pad=0.10)
+        resp_words = _align_call(wav_bytes, new_transcript)
 
-        # Call external alignment endpoint
-        files = { 'audio': ('clip.wav', wav_bytes, 'audio/wav') }
-        data = { 'transcript': new_transcript }
-        r = requests.post(current_app.config.get('ALIGN_ENDPOINT', 'http://silence-remover.com:8000/align'), files=files, data=data, timeout=60)
-        if not r.ok:
-            raise RuntimeError(f'prealign-skip:endpoint {r.status_code}')
-        res = r.json()
-        resp_words = (res or {}).get('words') or []
-        try:
-            _smpl = [(str((w or {}).get('word') or ''), (w or {}).get('start'), (w or {}).get('end')) for w in (resp_words[:10] or [])]
-            _log_info(f"[ALIGN] prealign response: words={len(resp_words)} sample={_smpl}")
-        except Exception:
-            pass
-
-        # Map response words to global times by order of non-space tokens; ensure non-zero durations
-        offset = ss
-        MIN_DUR = 0.20
-
-        def _norm(s):
-            try:
-                return str(s or '').strip()
-            except Exception:
-                return ''
-
-        new_seq = [(i, _norm(t)) for (i, t, _seg) in new_window if _norm(t) != '']
-        resp_seq = [((w or {}), _norm((w or {}).get('word'))) for w in (resp_words or []) if _norm((w or {}).get('word')) != '']
-        m = min(len(new_seq), len(resp_seq))
-        matched = 0
-        for k in range(m):
-            wi, _t = new_seq[k]
-            rw, _rt = resp_seq[k]
-            try:
-                rs = float(rw.get('start') or 0.0) + offset
-            except Exception:
-                rs = offset
-            try:
-                re = float(rw.get('end') or 0.0) + offset
-            except Exception:
-                re = rs
-            if not (re > rs):
-                # Try next response start
-                next_rs = None
-                if (k + 1) < m:
-                    try:
-                        rn = resp_seq[k+1][0]
-                        next_rs = float(rn.get('start') or 0.0) + offset
-                    except Exception:
-                        next_rs = None
-                re = next_rs if (next_rs is not None and next_rs > rs) else (rs + MIN_DUR)
-            updates.append((rs, re, wi))
-            matched += 1
-        _log_info(f"[ALIGN] prealign mapping: new_seq={len(new_seq)} resp_seq={len(resp_seq)} matched={matched} updates={len(updates)}")
+        # Map response words to updates; ensure non-zero durations
+        updates, matched = _map_aligned_to_updates(new_window, resp_words, ss, min_dur=0.20)
+        _log_info(f"[ALIGN] prealign mapping: new_seq={len(new_window)} resp_seq={len(resp_words)} matched={matched} updates={len(updates)}")
         if matched == 0:
             raise RuntimeError('prealign-skip:no-match')
 
@@ -485,56 +513,60 @@ def _carry_over_timings(db: DatabaseService, doc: str, latest: Optional[dict], w
                     prev_seq.append({ 'word': str(w or ''), 'start': st, 'end': en, 'prob': pr })
                 except Exception:
                     prev_seq.append({ 'word': str(w or ''), 'start': None, 'end': None, 'prob': None })
-            LOOKAHEAD = 64
-            pi = 0
-            enriched = []
-            for w in (words or []):
-                try:
-                    t = str(w.get('word') or '')
-                except Exception:
-                    t = ''
-                if t == '\n':
-                    enriched.append({ 'word': '\n' })
-                    continue
-                s_raw = w.get('start', None)
-                e_raw = w.get('end', None)
-                p_raw = w.get('probability', None)
 
-                def _num(x):
+            def _enrich_with_prev_seq(prev_seq_local, words_local):
+                LOOKAHEAD = 64
+                pi = 0
+                enriched_local = []
+                for w in (words_local or []):
                     try:
-                        return float(x)
+                        t = str(w.get('word') or '')
                     except Exception:
-                        return None
+                        t = ''
+                    if t == '\n':
+                        enriched_local.append({ 'word': '\n' })
+                        continue
+                    s_raw = w.get('start', None)
+                    e_raw = w.get('end', None)
+                    p_raw = w.get('probability', None)
 
-                s_num = _num(s_raw)
-                e_num = _num(e_raw)
-                timings_present = ((e_num is not None and e_num > 0) or (s_num is not None and s_num > 0))
-                try:
-                    p_num = float(p_raw)
-                    prob_present = (p_raw is not None) and (p_num == p_num)  # not NaN
-                except Exception:
-                    p_num = None
-                    prob_present = False
+                    def _num(x):
+                        try:
+                            return float(x)
+                        except Exception:
+                            return None
 
-                s_val = s_raw
-                e_val = e_raw
-                p_val = p_raw
-                if not (timings_present and prob_present):
-                    match_j = -1
-                    limit = min(len(prev_seq), pi + LOOKAHEAD)
-                    for j in range(pi, limit):
-                        if str(prev_seq[j]['word'] or '') == t:
-                            match_j = j
-                            break
-                    if match_j >= 0:
-                        pi = match_j + 1
-                        if not timings_present:
-                            s_val = prev_seq[match_j]['start']
-                            e_val = prev_seq[match_j]['end']
-                        if not prob_present:
-                            p_val = prev_seq[match_j]['prob']
-                enriched.append({ 'word': t, **({ 'start': s_val } if s_val is not None else {}), **({ 'end': e_val } if e_val is not None else {}), **({ 'probability': p_val } if p_val is not None else {}) })
-            words = enriched
+                    s_num = _num(s_raw)
+                    e_num = _num(e_raw)
+                    timings_present = ((e_num is not None and e_num > 0) or (s_num is not None and s_num > 0))
+                    try:
+                        p_num = float(p_raw)
+                        prob_present = (p_raw is not None) and (p_num == p_num)  # not NaN
+                    except Exception:
+                        p_num = None
+                        prob_present = False
+
+                    s_val = s_raw
+                    e_val = e_raw
+                    p_val = p_raw
+                    if not (timings_present and prob_present):
+                        match_j = -1
+                        limit = min(len(prev_seq_local), pi + LOOKAHEAD)
+                        for j in range(pi, limit):
+                            if str(prev_seq_local[j]['word'] or '') == t:
+                                match_j = j
+                                break
+                        if match_j >= 0:
+                            pi = match_j + 1
+                            if not timings_present:
+                                s_val = prev_seq_local[match_j]['start']
+                                e_val = prev_seq_local[match_j]['end']
+                            if not prob_present:
+                                p_val = prev_seq_local[match_j]['prob']
+                    enriched_local.append({ 'word': t, **({ 'start': s_val } if s_val is not None else {}), **({ 'end': e_val } if e_val is not None else {}), **({ 'probability': p_val } if p_val is not None else {}) })
+                return enriched_local
+
+            words = _enrich_with_prev_seq(prev_seq, words)
     except Exception:
         # On failure, fall through with the original words
         pass
@@ -1026,32 +1058,7 @@ def align_segment():
         return ("audio not found", 404)
 
     # If the resolved path is a tiny pointer file, attempt to dereference to blobs/<sha>
-    try:
-        import re as _re
-        if os.path.isfile(audio_path):
-            sz0 = os.path.getsize(audio_path)
-            if sz0 <= 512:
-                with open(audio_path, 'rb') as _pf:
-                    data = _pf.read(512)
-                # try common encodings
-                text = ''
-                for enc in ('utf-8','utf-16','utf-16-le','utf-16-be','latin-1'):
-                    try:
-                        text = data.decode(enc, 'ignore').strip()
-                        if text:
-                            break
-                    except Exception:
-                        continue
-                m = _re.search(r'([A-Fa-f0-9]{40,64})', text)
-                if m:
-                    sha = m.group(1)
-                    audio_dir = current_app.config.get('AUDIO_DIR')
-                    if audio_dir:
-                        cand = os.path.join(audio_dir, 'blobs', sha)
-                        if os.path.exists(cand):
-                            audio_path = cand
-    except Exception:
-        pass
+    audio_path = _maybe_deref_audio_pointer(audio_path)
 
     # Debug: log resolved audio path and size (helps diagnose pointer stubs vs. real blobs)
     try:
@@ -1063,22 +1070,9 @@ def align_segment():
     except Exception:
         pass
 
-    # Extract WAV clip via ffmpeg
-    pad = 0.10
-    ss = max(0.0, float(clip_start) - pad)
-    to = float(clip_end) + pad
-    cmd = [
-        'ffmpeg', '-hide_banner', '-loglevel', 'error',
-        '-ss', f'{ss:.3f}', '-to', f'{to:.3f}', '-i', audio_path,
-        '-ac', '1', '-ar', '16000', '-f', 'wav', 'pipe:1'
-    ]
+    # Extract WAV clip via ffmpeg and call align endpoint
     try:
-        logger.info(f"[ALIGN] ffmpeg cmd: {' '.join(cmd)}")
-    except Exception:
-        pass
-    try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        wav_bytes = p.stdout
+        wav_bytes, ss, to = _ffmpeg_extract_wav_clip(audio_path, clip_start, clip_end, pad=0.10)
     except Exception as e:
         try:
             err = getattr(e, 'stderr', b'')
@@ -1087,24 +1081,13 @@ def align_segment():
             pass
         return (f'ffmpeg failed: {getattr(e, "stderr", b"\"").decode("utf-8", "ignore")}', 500)
 
-    # Call external alignment endpoint
     try:
-        files = { 'audio': ('clip.wav', wav_bytes, 'audio/wav') }
-        data = { 'transcript': transcript }
-        r = requests.post(current_app.config.get('ALIGN_ENDPOINT', 'http://silence-remover.com:8000/align'), files=files, data=data, timeout=60)
-        if not r.ok:
-            return (f'align endpoint error: {r.status_code} {r.text[:200]}', 502)
-        res = r.json()
-        try:
-            rw = (res or {}).get('words') or []
-            logger.info(f"[ALIGN] align response: words={len(rw)} sample={[(x.get('word'), x.get('start'), x.get('end')) for x in rw[:10]]}")
-        except Exception:
-            pass
+        resp_words = _align_call(wav_bytes, transcript)
     except Exception as e:
         return (f'align request failed: {e}', 502)
 
     # Map response words to global times by order of non-space tokens; ensure non-zero durations
-    resp_words = (res or {}).get('words') or []
+    resp_words = resp_words or []
     offset = ss  # our clip starts at ss; align times relative to this
     MIN_DUR = 0.20
     # Build sequences excluding whitespace-only tokens
@@ -1159,6 +1142,7 @@ def align_segment():
         except Exception:
             pass
 
+    skipped = 0
     try:
         logger.info(f"[ALIGN] mapping: old_seq={len(old_seq)} resp={len(resp_words)} matched={matched} skipped_text_mismatch={skipped} diffs={len(diffs)}")
     except Exception:
