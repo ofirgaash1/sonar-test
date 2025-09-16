@@ -8,8 +8,15 @@ import { computeAbsIndexMap } from '../render/overlay.js';
 
 export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdle) {
   const dbg = (...args) => { try { if ((localStorage.getItem('v2:debug') || '').toLowerCase() === 'on') console.log(...args); } catch {} };
-  const openAlignToast = () => {
-    try { showToast('מיישר תזמונים…', 'info', 60000); } catch {}
+  const openAlignToast = (words = null, seconds = null) => {
+    try {
+      const w = Number.isFinite(+words) ? +words : null;
+      const s = Number.isFinite(+seconds) ? +seconds : null;
+      const msg = (w != null && s != null)
+        ? `מיישר תזמונים: ${w} מילים, ${s.toFixed(1)} שניות — נשלח…`
+        : 'מיישר תזמונים…';
+      showToast(msg, 'info', 60000);
+    } catch {}
   };
   const closeAlignToasts = () => {
     try {
@@ -354,16 +361,24 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
       try {
         if (typeof childV === 'number') {
           let alignMsg = null, alignType = 'info';
+          // Show immediate align toast with window stats (request start)
+          openAlignToast(stats.words || 0, stats.seconds || 0);
           try {
+            const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
             const ar = await alignSegment(filePath, { version: childV, segment: Math.max(0, segIdxGuess), neighbors: 1 });
+            const t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
             const w = stats.words || 0; const sec = stats.seconds || 0;
             dbg(`[dbg] align:resp ok=${!!(ar&&ar.ok)} changed=${+ar?.changed_count||0} total=${+ar?.total_compared||0}`);
             if (ar && ar.ok) {
               const ch = Number.isFinite(+ar.changed_count) ? +ar.changed_count : 0;
-              alignMsg = `מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — עודכנו ${ch}`;
+              const dt = Math.max(0, (t1 - t0));
+              const took = dt >= 1000 ? `${(dt/1000).toFixed(1)}s` : `${Math.round(dt)}ms`;
+              alignMsg = `מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — עודכנו ${ch} — ${took}`;
               alignType = ch > 0 ? 'success' : 'info';
             } else {
-              alignMsg = `מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — ללא שינוי`;
+              const dt = Math.max(0, (t1 - t0));
+              const took = dt >= 1000 ? `${(dt/1000).toFixed(1)}s` : `${Math.round(dt)}ms`;
+              alignMsg = `מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — ללא שינוי — ${took}`;
               alignType = 'info';
             }
           } catch (eAlign) {
@@ -377,6 +392,12 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
             dbg(`[dbg] words:received count=${aligned.length} with_timing=${countWithTimings(aligned)} prev_with_timing=${countWithTimings(getState().tokens||[])}`);
             store.setTokens(aligned);
             store.setLiveText(aligned.map(t => t.word || '').join(''));
+          } else {
+            // Fallback: keep saved words to avoid reverting UI to baseline
+            dbg('[dbg] words:aligned empty — keeping saved words');
+            const fallback = Array.isArray(wordsForSave) && wordsForSave.length ? wordsForSave : tokens;
+            store.setTokens(fallback);
+            store.setLiveText((fallback || []).map(t => t.word || '').join(''));
           }
           // Replace the long-running align toast with the final outcome now that words are fetched
           closeAlignToasts();

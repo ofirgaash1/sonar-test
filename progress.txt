@@ -1,0 +1,218 @@
+# Duplicate filename audit
+
+Note: Hidden folders (e.g., .git, .venv) excluded.
+
+=== __init__.cpython-312.pyc (2) ===
+- explore\\app\\__pycache__\\__init__.cpython-312.pyc
+- explore\\app\\services\\__pycache__\\__init__.cpython-312.pyc
+
+=== __init__.cpython-313.pyc (2) ===
+- explore\\app\\__pycache__\\__init__.cpython-313.pyc
+- explore\\app\\services\\__pycache__\\__init__.cpython-313.pyc
+
+=== __init__.py (2) ===
+- explore\\app\\__init__.py
+- explore\\app\\services\\__init__.py
+
+=== api.js (2) ===
+- data\\api.js
+- v2\\data\\api.js
+
+=== browser.js (2) ===
+- data\\browser.js
+- v2\\data\\browser.js
+
+=== canonical.js (2) ===
+- shared\\canonical.js
+- v2\\shared\\canonical.js
+
+=== controls.js (2) ===
+- ui\\controls.js
+- v2\\ui\\controls.js
+
+=== diff-panel.js (2) ===
+- render\\diff-panel.js
+- v2\\render\\diff-panel.js
+
+=== diff-worker.js (2) ===
+- v2\\workers\\diff-worker.js
+- workers\\diff-worker.js
+
+=== hud.js (2) ===
+- ui\\hud.js
+- v2\\ui\\hud.js
+
+=== index.html (2) ===
+- index.html
+- v2\\index.html
+
+=== init.js (2) ===
+- v2\\workers\\init.js
+- workers\\init.js
+
+=== karaoke.js (2) ===
+- player\\karaoke.js
+- v2\\player\\karaoke.js
+
+=== layers-view.js (2) ===
+- history\\layers-view.js
+- v2\\history\\layers-view.js
+
+=== layout.js (2) ===
+- ui\\layout.js
+- v2\\ui\\layout.js
+
+=== main.js (2) ===
+- main.js
+- v2\\main.js
+
+=== overlay.js (2) ===
+- render\\overlay.js
+- v2\\render\\overlay.js
+
+=== pipeline.js (2) ===
+- editor\\pipeline.js
+- v2\\editor\\pipeline.js
+
+=== protocol.js (2) ===
+- shared\\protocol.js
+- v2\\shared\\protocol.js
+
+=== README.MD (2) ===
+- explore\\readme.MD
+- README.MD
+
+=== requirements.txt (2) ===
+- explore\\app\\services\\requirements.txt
+- explore\\requirements.txt
+
+=== search.cpython-313.pyc (2) ===
+- explore\\app\\routes\\__pycache__\\search.cpython-313.pyc
+- explore\\app\\services\\__pycache__\\search.cpython-313.pyc
+
+=== search.py (2) ===
+- explore\\app\\routes\\search.py
+- explore\\app\\services\\search.py
+
+=== state.js (2) ===
+- core\\state.js
+- v2\\core\\state.js
+
+=== styles.css (2) ===
+- styles.css
+- v2\\styles.css
+
+=== sync.js (2) ===
+- player\\sync.js
+- v2\\player\\sync.js
+
+=== theme.js (2) ===
+- ui\\theme.js
+- v2\\ui\\theme.js
+
+=== verify-chain.js (2) ===
+- history\\verify-chain.js
+- v2\\history\\verify-chain.js
+
+=== virtualizer.js (2) ===
+- render\\virtualizer.js
+- v2\\render\\virtualizer.js
+
+=== full_transcript.json.gz (20) ===
+- json\\אבות האומה\\2024.05.09 #1 כללים במקום חוקים\\full_transcript.json.gz
+- json\\אבות האומה\\2024.05.16 נדב אנחנו צריכים יותר רוסים שינהלו אותנו #2\\full_transcript.json.gz
+- json\\אבות האומה\\2024.05.23 תופעת ההורה המלווה #3\\full_transcript.json.gz
+- json\\אבות האומה\\2024.05.30 תספורת ראשונה של אחרי ל״ג בעומר  עונת החתונות בפתח מי רואה את התמונות של אחרי #4\\full_transcript.json.gz
+- json\\אבות האומה\\2024.06.06 לקראת סוף החיים כדאי להיות קרובים לפתח תקווה. או רמת גן #5\\full_transcript.json.gz
+- json\\אבות האומה\\2024.06.13 אבות האומה - טיפולי ההמרה עובדים #6\\full_transcript.json.gz
+- json\\אבות האומה\\2024.06.27 זה שבע ברכות או סיום שנה #7\\full_transcript.json.gz
+- json\\אבות האומה\\2024.07.03 אם צריך להביא קלמר, זאת לא קייטנה, זה בית ספר #8\\full_transcript.json.gz
+- json\\אבות האומה\\2024.07.18 חופשת קיץ בין מלון לפי שעה ביוון למזוודה עם אוכל כשר מפתח תקווה #9\\full_transcript.json.gz
+- json\\אבות האומה\\2024.07.25 מה ההבדל בין ראול סטרס לשבת תרבות #10\\full_transcript.json.gz
+- json\\אבות האומה\\2024.08.01 מרוץ השליחים יולי אוגוסט #11\\full_transcript.json.gz
+- json\\אבות האומה\\2024.08.15 חרדה מאיראן ומזה שהילד יחזור לא מרוצה מהקייטנה #12\\full_transcript.json.gz
+- json\\אבות האומה\\2024.08.22 צריך לדעת ממי להתגרש, טו באב וחנן בן ארי #13\\full_transcript.json.gz
+- json\\אבות האומה\\2024.09.05 להיות מורה כדי להציל את הילדים מההורים שלהם #14\\full_transcript.json.gz
+- json\\אבות האומה\\2024.09.12 התחלנו עם קאמלה האריס סיימנו עם אביבית בר זוהר #15\\full_transcript.json.gz
+- json\\אבות האומה\\2024.09.26 הדיכוטומיה האשכנזית  חנוך דאום שולח לינק  המשכיל בעת הזאת ידם #16\\full_transcript.json.gz
+- json\\אבות האומה\\2024.10.02 ראש חודש אוקטובר  מה יותר הגיוני מלשים סוכן מוסד ביחידה שמטפלת במוסד  נעלמו המבטאים ויותר קשה לצחוק #17\\full_transcript.json.gz
+- json\\אבות האומה\\2024.10.10 לפני קלמן ליברמן היה למירי רגב את טרנטינו  רשמו לפניכם מלחמת החלל הראשונה הייתה בין תימן לישראל #18\\full_transcript.json.gz
+- json\\אבות האומה\\2024.10.15 פסטיבל התמר ופאר טסי אחד  אהבה במרוקו או לונלי פלאנט #19\\full_transcript.json.gz
+- json\\אבות האומה\\2024.10.31 נדב מתחיל לשמור שבת  רלוונט נסגר לאן הולכים מכאן #20\\full_transcript.json.gz
+
+=== speech_probs.frame.gz (20) ===
+- json\\אבות האומה\\2024.05.09 #1 כללים במקום חוקים\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.05.16 נדב אנחנו צריכים יותר רוסים שינהלו אותנו #2\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.05.23 תופעת ההורה המלווה #3\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.05.30 תספורת ראשונה של אחרי ל״ג בעומר  עונת החתונות בפתח מי רואה את התמונות של אחרי #4\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.06.06 לקראת סוף החיים כדאי להיות קרובים לפתח תקווה. או רמת גן #5\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.06.13 אבות האומה - טיפולי ההמרה עובדים #6\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.06.27 זה שבע ברכות או סיום שנה #7\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.07.03 אם צריך להביא קלמר, זאת לא קייטנה, זה בית ספר #8\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.07.18 חופשת קיץ בין מלון לפי שעה ביוון למזוודה עם אוכל כשר מפתח תקווה #9\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.07.25 מה ההבדל בין ראול סטרס לשבת תרבות #10\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.08.01 מרוץ השליחים יולי אוגוסט #11\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.08.15 חרדה מאיראן ומזה שהילד יחזור לא מרוצה מהקייטנה #12\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.08.22 צריך לדעת ממי להתגרש, טו באב וחנן בן ארי #13\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.09.05 להיות מורה כדי להציל את הילדים מההורים שלהם #14\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.09.12 התחלנו עם קאמלה האריס סיימנו עם אביבית בר זוהר #15\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.09.26 הדיכוטומיה האשכנזית  חנוך דאום שולח לינק  המשכיל בעת הזאת ידם #16\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.10.02 ראש חודש אוקטובר  מה יותר הגיוני מלשים סוכן מוסד ביחידה שמטפלת במוסד  נעלמו המבטאים ויותר קשה לצחוק #17\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.10.10 לפני קלמן ליברמן היה למירי רגב את טרנטינו  רשמו לפניכם מלחמת החלל הראשונה הייתה בין תימן לישראל #18\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.10.15 פסטיבל התמר ופאר טסי אחד  אהבה במרוקו או לונלי פלאנט #19\\speech_probs.frame.gz
+- json\\אבות האומה\\2024.10.31 נדב מתחיל לשמור שבת  רלוונט נסגר לאן הולכים מכאן #20\\speech_probs.frame.gz
+
+
+# Diff summary (v2 vs non-v2)
+
+data/api.js <> v2/data/api.js : +293 -328
+data/browser.js <> v2/data/browser.js : identical
+shared/canonical.js <> v2/shared/canonical.js : identical
+ui/controls.js <> v2/ui/controls.js : +191 -36
+render/diff-panel.js <> v2/render/diff-panel.js : identical
+workers/diff-worker.js <> v2/workers/diff-worker.js : +1 -2
+ui/hud.js <> v2/ui/hud.js : +12 -2
+index.html <> v2/index.html : +64 -21
+workers/init.js <> v2/workers/init.js : +5 -18
+player/karaoke.js <> v2/player/karaoke.js : +62 -5
+history/layers-view.js <> v2/history/layers-view.js : +37 -2
+ui/layout.js <> v2/ui/layout.js : identical
+main.js <> v2/main.js : +367 -28
+render/overlay.js <> v2/render/overlay.js : +84 -38
+editor/pipeline.js <> v2/editor/pipeline.js : +31 -15
+shared/protocol.js <> v2/shared/protocol.js : identical
+core/state.js <> v2/core/state.js : identical
+styles.css <> v2/styles.css : +89 -4
+player/sync.js <> v2/player/sync.js : identical
+ui/theme.js <> v2/ui/theme.js : identical
+history/verify-chain.js <> v2/history/verify-chain.js : +27 -27
+render/virtualizer.js <> v2/render/virtualizer.js : +30 -6
+
+
+# Actions taken
+
+Deleted identical duplicates in favor of v2 copies:
+- data/browser.js (kept v2/data/browser.js)
+- shared/canonical.js (kept v2/shared/canonical.js)
+- render/diff-panel.js (kept v2/render/diff-panel.js)
+- ui/layout.js (kept v2/ui/layout.js)
+- shared/protocol.js (kept v2/shared/protocol.js)
+- core/state.js (kept v2/core/state.js)
+- player/sync.js (kept v2/player/sync.js)
+- ui/theme.js (kept v2/ui/theme.js)
+
+Deleted legacy non-v2 frontend files (v2 is canonical):
+- index.html (kept v2/index.html; app serves /v2)
+- main.js (kept v2/main.js)
+- styles.css (kept v2/styles.css)
+- data/api.js (kept v2/data/api.js)
+- editor/pipeline.js (kept v2/editor/pipeline.js)
+- render/overlay.js (kept v2/render/overlay.js)
+- history/layers-view.js (kept v2/history/layers-view.js)
+- ui/hud.js (kept v2/ui/hud.js)
+- ui/controls.js (kept v2/ui/controls.js)
+- player/karaoke.js (kept v2/player/karaoke.js)
+- history/verify-chain.js (kept v2/history/verify-chain.js)
+- render/virtualizer.js (kept v2/render/virtualizer.js)
+- workers/diff-worker.js (kept v2/workers/diff-worker.js)
+- workers/init.js (kept v2/workers/init.js)

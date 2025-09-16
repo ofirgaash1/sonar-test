@@ -1,9 +1,39 @@
-1. show "מיישר תזמונים" until we get a response from the endpoint (done)
-2. make sure after we get the alignment and update the db successfuly, we pull the changes from the db and show the updated state of the document (done)
-3. when the "השוואות" tab in the diff card is open and the user did some edit and saved it, and then the user navigates between files in the browser - the השוואות tab should update to show the current shown transcript (not to be stuck behind) (done)
+
+1. i see "מיישר תזמונים: x מילים, y  שניות — עודכנו 16" only when i get response instead of when i send the request to the endpoint
+2. at response i would like to have a toast that says how much time the response took (req minus res times)
+3. something is really weird here, look at my "השוואות" tab, i copied it's content for you, clearly there is a bug:
+שכבות שינויים עבור אבות האומה/2024.05.16 נדב אנחנו צריכים יותר רוסים שינהלו אותנו #2.opus
+מאת dev@ivrit.ai
+— v0 → v1
+עולאולעםאין
+⏱ שינויים בתזמונים (קטעים 0–2)
+נדב · start 3.320→5.082 (+1.762), end 4.040→5.263 (+1.223)
+אבוקסיס · start 4.040→7.486 (+3.446), end 4.520→10.590 (+6.070)
+ואריאל · start 4.520→10.690 (+6.170), end 4.940→18.019 (+13.079)
+שנאבל · start 4.940→18.079 (+13.139), end 5.340→18.500 (+13.160)
+עם · start 5.340→18.500 (+13.160), end 5.820→18.700 (+12.880)
+אבות · start 5.820→18.500 (+12.680), end 7.380→18.700 (+11.320)
+האומה, · start 7.380→18.500 (+11.120), end 7.820→18.700 (+10.880)
+עם · start 8.300→18.500 (+10.200), end 8.800→18.700 (+9.900)
+בית · start 8.800→18.500 (+9.700), end 9.020→18.700 (+9.680)
+עול · start 9.060→18.500 (+9.440), end 9.260→18.700 (+9.440)
+עם · start 9.260→18.500 (+9.240), end 9.520→18.700 (+9.180)
+הבית · start 9.520→18.500 (+8.980), end 10.640→18.700 (+8.060)
+של · start 10.640→18.500 (+7.860), end 10.780→18.700 (+7.920)
+הפודקאסטים. · start 10.780→18.500 (+7.720), end 11.420→18.700 (+7.280)
+אריאל · start 17.620→18.500 (+0.880), end 17.980→18.700 (+0.720)
+שנאבל. · start 17.980→18.500 (+0.520), end 18.500→18.700 (+0.200)
+
 4. it seems like after a successful alignment, the corrections are dropped/reverted to initial state in the transcript card (but not in the diff card where you can see the actual fixes, which means the data )
-5. log any Clamp end_time >= start_time.
-If rw.end or rw.start missing log it
-In /transcripts/words, before emitting JSON:
-If end_time is NULL or <= start_time log it
-the goal is to have automated tests - no manual clicks, full coverage
+
+5. the goal is to have automated tests - no manual clicks, full coverage
+
+6. find any unused files and permanently delete them.
+---
+Progress update (by Codex):
+- [x] 1) Align toast on request send — now shows words+seconds immediately.
+- [x] 2) Align response toast includes duration (ms/s).
+- [x] 4) Prevent reversion after alignment — fallback to saved words if aligned words are empty.
+- [~] 3) Atomicity issue: likely fixed by sha256 + UI fixes; please re-test. If it persists, I will add extra state guards.
+- [ ] 5) Tests: propose Playwright flow + API mocks; can scaffold next.
+- [ ] 6) Unused files: initial v2 consolidation done; will continue sweep (workers/diff-core.js relocation).
