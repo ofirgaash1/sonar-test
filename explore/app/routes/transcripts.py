@@ -364,6 +364,27 @@ def _compute_clip_from_prev_rows(prev_rows) -> tuple[Optional[float], Optional[f
     return float(clip_start), float(clip_end)
 
 
+def _segment_window(seg_hint, neighbors: int) -> tuple[int, int]:
+    seg = int(seg_hint)
+    n = _clamp_neighbors(neighbors)
+    start_seg = max(0, seg - n)
+    end_seg = seg + n
+    return start_seg, end_seg
+
+
+def _fetch_prev_rows_for_window(db: DatabaseService, doc: str, version: int, start_seg: int, end_seg: int):
+    cur = db.execute(
+        """
+        SELECT segment_index, word_index, word, start_time, end_time, probability
+        FROM transcript_words
+        WHERE file_path=? AND version=? AND segment_index >= ? AND segment_index <= ?
+        ORDER BY word_index ASC
+        """,
+        [doc, int(version), start_seg, end_seg]
+    )
+    return cur.fetchall() or []
+
+
 def _check_save_conflict(db: DatabaseService, doc: str, latest: Optional[dict], parent_version, expected_base_sha256: str, text: str):
     """Return a conflict payload (dict) if the save should be rejected, else None.
 
@@ -434,27 +455,17 @@ def _prealign_updates(db: DatabaseService, doc: str, latest: Optional[dict], wor
         return updates, token_ops_block
 
     try:
-        seg_hint = int(seg_hint)
-        neighbors = _clamp_neighbors(neighbors)
-        start_seg = max(0, int(seg_hint) - neighbors)
-        end_seg = int(seg_hint) + neighbors
+        start_seg, end_seg = _segment_window(seg_hint, neighbors)
         # Gather previous timings to determine clip
-        cur = db.execute(
-            """
-            SELECT segment_index, word_index, word, start_time, end_time, probability
-            FROM transcript_words
-            WHERE file_path=? AND version=? AND segment_index >= ? AND segment_index <= ?
-            ORDER BY word_index ASC
-            """,
-            [doc, int(latest['version']), start_seg, end_seg]
-        )
-        prev_rows = cur.fetchall() or []
+        prev_rows = _fetch_prev_rows_for_window(db, doc, int(latest['version']), start_seg, end_seg)
         clip_start, clip_end = _compute_clip_from_prev_rows(prev_rows)
         if clip_start is None or clip_end is None:
             raise RuntimeError('prealign-skip:no-timings')
 
         # Build new window transcript and mapping of word indices
         new_window, new_transcript = _build_new_window(words, start_seg, end_seg)
+        if not new_transcript:
+            raise RuntimeError('prealign-skip:empty-window')
 
         # Resolve audio (with pointer deref safety)
         from ..utils import resolve_audio_path
@@ -1086,65 +1097,52 @@ def align_segment():
     except Exception as e:
         return (f'align request failed: {e}', 502)
 
-    # Map response words to global times by order of non-space tokens; ensure non-zero durations
+    # Map response words to global times using helper and generate diffs
     resp_words = resp_words or []
     offset = ss  # our clip starts at ss; align times relative to this
-    MIN_DUR = 0.20
-    # Build sequences excluding whitespace-only tokens
+    # new_window mirrors (word_index, text, seg) from the window
     def _norm(s):
         try:
             return str(s or '').strip()
         except Exception:
             return ''
-    old_seq = [w for w in words if _norm(w.get('word')) != '']
-    resp_seq = [w or {} for w in resp_words if _norm((w or {}).get('word')) != '']
+
+    new_window = [(int(w.get('wi')), str(w.get('word') or ''), int(w.get('seg'))) for w in words]
+    updates_compact, matched = _map_aligned_to_updates(new_window, resp_words, offset, min_dur=0.20)
+
+    # For diffs, look up original token timings by word_index
+    by_wi = { int(w.get('wi')): w for w in words if w and (w.get('wi') is not None) }
     diffs = []
-    matched = 0
-    updates = []  # (start_time, end_time, file_path, version, word_index)
-    m = min(len(old_seq), len(resp_seq))
-    for i in range(m):
-        ow = old_seq[i]
-        rw = resp_seq[i] or {}
-        ow_text = _norm(ow.get('word'))
-        old_s = float(ow.get('start') or ow.get('end') or 0.0)
-        old_e = float(ow.get('end') or ow.get('start') or 0.0)
+    updates = []  # rows for DB update
+    for new_s, new_e, wi in updates_compact:
+        ow = by_wi.get(int(wi)) or {}
         try:
-            new_s = float(rw.get('start') or 0.0) + offset
+            old_s = float(ow.get('start') or ow.get('end') or 0.0)
         except Exception:
-            new_s = offset
+            old_s = 0.0
         try:
-            new_e = float(rw.get('end') or 0.0) + offset
+            old_e = float(ow.get('end') or ow.get('start') or 0.0)
         except Exception:
-            new_e = new_s
-        if not (new_e > new_s):
-            # try next start or min duration
-            next_s = None
-            if (i + 1) < m:
-                try:
-                    next_s = float((resp_seq[i+1] or {}).get('start') or 0.0) + offset
-                except Exception:
-                    next_s = None
-            new_e = next_s if (next_s is not None and next_s > new_s) else (new_s + MIN_DUR)
+            old_e = old_s
+        word_text = _norm(ow.get('word'))
+        seg_idx = int(ow.get('seg') or seg)
         diffs.append({
-            'word': ow_text,
+            'word': word_text,
             'old_start': old_s,
             'old_end': old_e,
-            'new_start': new_s,
-            'new_end': new_e,
-            'delta_start': new_s - old_s,
-            'delta_end': new_e - old_e,
-            'segment_index': int(ow.get('seg') or seg),
+            'new_start': float(new_s),
+            'new_end': float(new_e),
+            'delta_start': float(new_s) - old_s,
+            'delta_end': float(new_e) - old_e,
+            'segment_index': seg_idx,
         })
-        matched += 1
-        try:
-            wi = int(ow.get('wi'))
-            updates.append((new_s, new_e, doc, int(version), wi))
-        except Exception:
-            pass
+        updates.append((float(new_s), float(new_e), doc, int(version), int(wi)))
 
-    skipped = 0
+    # Logging
     try:
-        logger.info(f"[ALIGN] mapping: old_seq={len(old_seq)} resp={len(resp_words)} matched={matched} skipped_text_mismatch={skipped} diffs={len(diffs)}")
+        nonspace_old = sum(1 for _wi, t, _sg in new_window if _norm(t) != '')
+        nonspace_resp = sum(1 for rw in resp_words if _norm((rw or {}).get('word')) != '')
+        logger.info(f"[ALIGN] mapping: old_seq={nonspace_old} resp={nonspace_resp} matched={matched} skipped_text_mismatch=0 diffs={len(diffs)}")
     except Exception:
         pass
 
