@@ -547,6 +547,141 @@ def _carry_over_timings(db: DatabaseService, doc: str, latest: Optional[dict], w
     return words, words_json
 
 
+def _build_segment_filter(seg_q: str, count_q: str):
+    """Return (seg_filter_sql, params_extra, window) for segment filtering.
+
+    window is either None or a tuple (seg, end_seg) for slicing fallback JSON.
+    """
+    seg_filter_sql = ''
+    params_extra = []
+    window = None
+    if seg_q.isdigit():
+        seg = int(seg_q)
+        if count_q.isdigit():
+            end_seg = seg + max(0, int(count_q)) - 1
+        else:
+            end_seg = seg + _DEFAULT_SEGMENT_CHUNK - 1
+        seg_filter_sql = ' AND segment_index >= ? AND segment_index <= ?'
+        params_extra = [seg, end_seg]
+        window = (seg, end_seg)
+    return seg_filter_sql, params_extra, window
+
+
+def _normalize_db_words_rows(rows):
+    """Normalize rows from transcript_words into the words JSON shape.
+
+    Ensures per-segment non-zero durations and inserts newline tokens between segments.
+    Returns (out, with_timing_count).
+    """
+    MIN_DUR = 0.20
+    out = []
+    with_timing = 0
+    cur_seg = None
+    buf = []  # collect tokens for current segment
+
+    def flush_segment(segment_tokens):
+        nonlocal out, with_timing
+        n = len(segment_tokens)
+        # First pass: ensure numeric values
+        for t in segment_tokens:
+            try:
+                if t.get('start') is None:
+                    t['start'] = 0.0
+                else:
+                    t['start'] = float(t.get('start') or 0.0)
+            except Exception:
+                t['start'] = 0.0
+            try:
+                if t.get('end') is None:
+                    t['end'] = float(t.get('start') or 0.0)
+                else:
+                    t['end'] = float(t.get('end') or 0.0)
+            except Exception:
+                t['end'] = float(t.get('start') or 0.0)
+        # Second pass: lookahead normalization
+        for i in range(n):
+            s = float(segment_tokens[i].get('start') or 0.0)
+            e = float(segment_tokens[i].get('end') or 0.0)
+            if not (e > s):
+                # Try next start within segment
+                next_s = None
+                for j in range(i+1, n):
+                    ns = float(segment_tokens[j].get('start') or 0.0)
+                    if ns > s:
+                        next_s = ns
+                        break
+                if next_s is not None:
+                    e = next_s
+                else:
+                    e = s + MIN_DUR
+                segment_tokens[i]['end'] = e
+            # accumulate timing count
+            if (s > 0) or (e > 0):
+                with_timing += 1
+        out.extend(segment_tokens)
+
+    for seg, wi, word, st, en, pr in rows:
+        if (cur_seg is not None) and (seg != cur_seg):
+            # newline separator between segments
+            if buf:
+                flush_segment(buf)
+                buf = []
+            # Use the last known time from previous segment for the newline token
+            try:
+                prev_end = out[-1]['end'] if out else 0.0
+            except Exception:
+                prev_end = 0.0
+            out.append({"word": "\n", "start": prev_end, "end": prev_end, "probability": None})
+        # push current token into segment buffer
+        buf.append({
+            "word": word,
+            "start": st if st is not None else 0.0,
+            "end": en if en is not None else None,
+            "probability": float(pr) if pr is not None else None,
+        })
+        cur_seg = seg
+    # flush last segment
+    if buf:
+        flush_segment(buf)
+
+    return out, with_timing
+
+
+def _slice_words_json(words: list, seg: int, end_seg: int) -> list:
+    """Slice stored JSON words by segment boundaries keeping newline tokens.
+
+    Mirrors the previous inline logic for segment slicing.
+    """
+    out = []
+    cur_seg = 0
+    started = False
+    for w in words:
+        if not w:
+            continue
+        word_val = w.get('word') if isinstance(w, dict) else None
+        if word_val == '\n':
+            # If we've started collecting and reached the end segment, stop
+            if started and cur_seg >= end_seg:
+                break
+            # Advance segment counter, and if still within the requested window, include a newline token
+            cur_seg += 1
+            if started and cur_seg <= end_seg:
+                out.append({"word": "\n", "start": w.get('start') or 0.0, "end": w.get('start') or 0.0, "probability": None})
+            continue
+        # Skip words before the first requested segment
+        if cur_seg < seg:
+            continue
+        started = True
+        # Normalize fields and defaults
+        out.append({
+            "word": str(w.get('word') or ''),
+            "start": float(w.get('start') or 0.0),
+            "end": float(w.get('end') if w.get('end') is not None else (w.get('start') or 0.0)),
+            "probability": (float(w.get('probability')) if (w.get('probability') is not None and w.get('probability') != '') else None),
+        })
+    return out
+
+
 def _latest_row(db: DatabaseService, file_path: str) -> Optional[dict]:
     cur = db.execute(
         "SELECT version, base_sha256, text, words, COALESCE(created_by,'') FROM transcripts WHERE file_path=? ORDER BY version DESC LIMIT 1",
@@ -1222,20 +1357,9 @@ def get_words():
     if not doc or not version.isdigit():
         abort(400, 'missing ?doc= and/or ?version=')
     db = _db(); _ensure_schema(db)
-    # Try normalized table first
-    params = [doc, int(version)]
-    seg_filter_sql = ''
-    if seg_q.isdigit():
-        seg = int(seg_q)
-        seg_filter_sql = ' AND segment_index >= ?'
-        params.append(seg)
-        # If count provided use it, otherwise default to a safe chunk size
-        if count_q.isdigit():
-            end_seg = seg + max(0, int(count_q)) - 1
-        else:
-            end_seg = seg + _DEFAULT_SEGMENT_CHUNK - 1
-        seg_filter_sql += ' AND segment_index <= ?'
-        params.append(end_seg)
+    # Build segment filter
+    seg_filter_sql, extra_params, window = _build_segment_filter(seg_q, count_q)
+    params = [doc, int(version), *extra_params]
 
     cur = db.execute(
         f"""
@@ -1248,79 +1372,7 @@ def get_words():
     )
     rows = cur.fetchall() or []
     if rows:
-        # Normalize per-segment so end >= start. If end missing/<=start, use next token's start
-        # within the same segment; otherwise use start + MIN_DUR.
-        MIN_DUR = 0.20
-        out = []
-        with_timing = 0
-        cur_seg = None
-        buf = []  # collect tokens for current segment
-
-        def flush_segment(segment_tokens):
-            nonlocal out, with_timing
-            n = len(segment_tokens)
-            # First pass: ensure numeric values
-            for t in segment_tokens:
-                try:
-                    if t.get('start') is None:
-                        t['start'] = 0.0
-                    else:
-                        t['start'] = float(t.get('start') or 0.0)
-                except Exception:
-                    t['start'] = 0.0
-                try:
-                    if t.get('end') is None:
-                        t['end'] = float(t.get('start') or 0.0)
-                    else:
-                        t['end'] = float(t.get('end') or 0.0)
-                except Exception:
-                    t['end'] = float(t.get('start') or 0.0)
-            # Second pass: lookahead normalization
-            for i in range(n):
-                s = float(segment_tokens[i].get('start') or 0.0)
-                e = float(segment_tokens[i].get('end') or 0.0)
-                if not (e > s):
-                    # Try next start within segment
-                    next_s = None
-                    for j in range(i+1, n):
-                        ns = float(segment_tokens[j].get('start') or 0.0)
-                        if ns > s:
-                            next_s = ns
-                            break
-                    if next_s is not None:
-                        e = next_s
-                    else:
-                        e = s + MIN_DUR
-                    segment_tokens[i]['end'] = e
-                # accumulate timing count
-                if (s > 0) or (e > 0):
-                    with_timing += 1
-            out.extend(segment_tokens)
-
-        for seg, wi, word, st, en, pr in rows:
-            if (cur_seg is not None) and (seg != cur_seg):
-                # newline separator between segments
-                if buf:
-                    flush_segment(buf)
-                    buf = []
-                # Use the last known time from previous segment for the newline token
-                try:
-                    prev_end = out[-1]['end'] if out else 0.0
-                except Exception:
-                    prev_end = 0.0
-                out.append({"word": "\n", "start": prev_end, "end": prev_end, "probability": None})
-            # push current token into segment buffer
-            buf.append({
-                "word": word,
-                "start": st if st is not None else 0.0,
-                "end": en if en is not None else None,
-                "probability": float(pr) if pr is not None else None,
-            })
-            cur_seg = seg
-        # flush last segment
-        if buf:
-            flush_segment(buf)
-
+        out, with_timing = _normalize_db_words_rows(rows)
         try:
             logger.info(f"[WORDS] doc={doc!r} ver={version} seg_q={seg_q!r} count_q={count_q!r} returned={len(out)} with_timing={with_timing}")
         except Exception:
@@ -1334,39 +1386,8 @@ def get_words():
     words = row.get('words') or []
     if seg_filter_sql:
         # Slice by counting newlines as segment boundaries and preserve newline tokens
-        seg = int(seg_q)
-        if count_q.isdigit():
-            end_seg = seg + max(0, int(count_q)) - 1
-        else:
-            end_seg = seg + _DEFAULT_SEGMENT_CHUNK - 1
-
-        out = []
-        cur_seg = 0
-        started = False
-        for w in words:
-            if not w:
-                continue
-            word_val = w.get('word') if isinstance(w, dict) else None
-            if word_val == '\n':
-                # If we've started collecting and reached the end segment, stop
-                if started and cur_seg >= end_seg:
-                    break
-                # Advance segment counter, and if still within the requested window, include a newline token
-                cur_seg += 1
-                if started and cur_seg <= end_seg:
-                    out.append({"word": "\n", "start": w.get('start') or 0.0, "end": w.get('start') or 0.0, "probability": None})
-                continue
-            # Skip words before the first requested segment
-            if cur_seg < seg:
-                continue
-            started = True
-            # Normalize fields and defaults
-            out.append({
-                "word": str(w.get('word') or ''),
-                "start": float(w.get('start') or 0.0),
-                "end": float(w.get('end') if w.get('end') is not None else (w.get('start') or 0.0)),
-                "probability": (float(w.get('probability')) if (w.get('probability') is not None and w.get('probability') != '') else None),
-            })
+        seg, end_seg = window  # type: ignore
+        out = _slice_words_json(words, int(seg), int(end_seg))
         return jsonify(out)
     return jsonify(words)
 
