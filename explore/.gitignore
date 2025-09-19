@@ -1,7 +1,7 @@
 # data 
 data/
-audio-log/
-
+audio-log
+audio-log/*
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
