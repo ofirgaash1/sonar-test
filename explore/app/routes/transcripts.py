@@ -4,6 +4,9 @@ import hashlib
 import difflib
 import os
 import logging
+import time
+import uuid
+import re as _re
 from typing import Optional
 
 import orjson
@@ -143,7 +146,7 @@ def _ensure_schema(db: DatabaseService):
         db.execute("CREATE INDEX IF NOT EXISTS idx_tw_doc_ver ON transcript_words(file_path, version)")
         _set_user_version(db, 2)
 
-    # v3: Defensive create-if-missing for all tables and columns
+    # v3: Defensive create-if-missing for all tables
     if current < 3:
         # Tables (no-op if already exist)
         db.execute(
@@ -211,13 +214,54 @@ def _ensure_schema(db: DatabaseService):
         db.execute("CREATE INDEX IF NOT EXISTS idx_tw_doc_ver_seg ON transcript_words(file_path, version, segment_index)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_tw_doc_ver ON transcript_words(file_path, version)")
 
-        # Column backfills
-        if not _column_exists(db, 'transcripts', 'created_by'):
-            db.execute("ALTER TABLE transcripts ADD COLUMN created_by TEXT")
-
         _set_user_version(db, 3)
 
-    db.commit()
+    # Post-check: ensure required columns exist even if user_version is incorrect
+    try:
+        # transcripts
+        if _table_exists(db, 'transcripts'):
+            if not _column_exists(db, 'transcripts', 'words'):
+                db.execute("ALTER TABLE transcripts ADD COLUMN words TEXT")
+            if not _column_exists(db, 'transcripts', 'created_by'):
+                db.execute("ALTER TABLE transcripts ADD COLUMN created_by TEXT")
+            if not _column_exists(db, 'transcripts', 'created_at'):
+                db.execute("ALTER TABLE transcripts ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            if not _column_exists(db, 'transcripts', 'base_sha256'):
+                db.execute("ALTER TABLE transcripts ADD COLUMN base_sha256 TEXT")
+            if not _column_exists(db, 'transcripts', 'text'):
+                db.execute("ALTER TABLE transcripts ADD COLUMN text TEXT")
+        # transcript_edits
+        if _table_exists(db, 'transcript_edits'):
+            if not _column_exists(db, 'transcript_edits', 'dmp_patch'):
+                db.execute("ALTER TABLE transcript_edits ADD COLUMN dmp_patch TEXT")
+            if not _column_exists(db, 'transcript_edits', 'token_ops'):
+                db.execute("ALTER TABLE transcript_edits ADD COLUMN token_ops TEXT")
+            if not _column_exists(db, 'transcript_edits', 'created_at'):
+                db.execute("ALTER TABLE transcript_edits ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        # transcript_confirmations
+        if _table_exists(db, 'transcript_confirmations'):
+            if not _column_exists(db, 'transcript_confirmations', 'base_sha256'):
+                db.execute("ALTER TABLE transcript_confirmations ADD COLUMN base_sha256 TEXT")
+            if not _column_exists(db, 'transcript_confirmations', 'prefix'):
+                db.execute("ALTER TABLE transcript_confirmations ADD COLUMN prefix TEXT")
+            if not _column_exists(db, 'transcript_confirmations', 'exact'):
+                db.execute("ALTER TABLE transcript_confirmations ADD COLUMN exact TEXT")
+            if not _column_exists(db, 'transcript_confirmations', 'suffix'):
+                db.execute("ALTER TABLE transcript_confirmations ADD COLUMN suffix TEXT")
+            if not _column_exists(db, 'transcript_confirmations', 'created_at'):
+                db.execute("ALTER TABLE transcript_confirmations ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        # transcript_words
+        if _table_exists(db, 'transcript_words'):
+            if not _column_exists(db, 'transcript_words', 'segment_index'):
+                db.execute("ALTER TABLE transcript_words ADD COLUMN segment_index INTEGER")
+            if not _column_exists(db, 'transcript_words', 'start_time'):
+                db.execute("ALTER TABLE transcript_words ADD COLUMN start_time DOUBLE")
+            if not _column_exists(db, 'transcript_words', 'end_time'):
+                db.execute("ALTER TABLE transcript_words ADD COLUMN end_time DOUBLE")
+            if not _column_exists(db, 'transcript_words', 'probability'):
+                db.execute("ALTER TABLE transcript_words ADD COLUMN probability DOUBLE")
+    finally:
+        db.commit()
 
 
 def _sha256_hex(s: str) -> str:
@@ -247,23 +291,52 @@ def _log_info(msg: str) -> None:
         pass
 
 
+def _ensure_safe_doc(doc: str) -> None:
+    """Abort 400 if `doc` is unsafe (path traversal or absolute paths).
+
+    Allows forward slashes for logical grouping but disallows absolute paths,
+    Windows drive prefixes, backslashes, `..` components, nulls, and odd chars.
+    """
+    d = (doc or "").strip()
+    if not d:
+        abort(400, 'invalid doc')
+    if '\x00' in d:
+        abort(400, 'invalid doc')
+    # Absolute path patterns
+    if d.startswith('/') or d.startswith('\\') or _re.match(r'^[A-Za-z]:[\\/]', d):
+        abort(400, 'invalid doc')
+    # Parent directory traversal
+    parts_slash = [p for p in d.split('/') if p]
+    parts_backslash = [p for p in d.split('\\') if p]
+    if any(p == '..' for p in parts_slash) or any(p == '..' for p in parts_backslash):
+        abort(400, 'invalid doc')
+
+
 def _maybe_deref_audio_pointer(audio_path: str) -> str:
     """If `audio_path` is a tiny pointer file, try to dereference to blobs/<sha>.
-    Returns the best path (original if no change).
+    Requires a strict marker like 'sha:<hex>'. Returns original path if no safe match.
     """
     try:
         if os.path.isfile(audio_path) and os.path.getsize(audio_path) <= 512:
             with open(audio_path, 'rb') as _pf:
                 data = _pf.read(512)
+            text = ''
+            try:
+                text = data.decode('utf-8', 'ignore')
+            except Exception:
+                text = ''
             import re as _re
-            m = _re.search(r'([A-Fa-f0-9]{40,64})', data.decode('utf-8','ignore'))
-            if m:
-                sha = m.group(1)
-                audio_dir = current_app.config.get('AUDIO_DIR')
-                if audio_dir:
-                    cand = os.path.join(audio_dir, 'blobs', sha)
-                    if os.path.exists(cand):
-                        return cand
+            m = _re.search(r'\bsha:([a-fA-F0-9]{40,64})\b', text)
+            if not m:
+                return audio_path
+            sha = m.group(1)
+            audio_dir = current_app.config.get('AUDIO_DIR')
+            if not audio_dir:
+                return audio_path
+            cand = os.path.join(audio_dir, 'blobs', sha)
+            # Only dereference to an existing regular file
+            if os.path.isfile(cand):
+                return cand
     except Exception:
         pass
     return audio_path
@@ -283,20 +356,83 @@ def _ffmpeg_extract_wav_clip(audio_path: str, clip_start: float, clip_end: float
     return p.stdout, ss, to
 
 
-def _align_call(wav_bytes: bytes, transcript: str) -> list:
+def _align_call(wav_bytes: bytes, transcript: str) -> dict:
     files = { 'audio': ('clip.wav', wav_bytes, 'audio/wav') }
     data = { 'transcript': transcript }
     r = requests.post(current_app.config.get('ALIGN_ENDPOINT', 'http://silence-remover.com:8000/align'), files=files, data=data, timeout=60)
     if not r.ok:
-        raise RuntimeError(f'align-endpoint {r.status_code}')
+        raise RuntimeError(f'align-endpoint {r.status_code}: {r.text[:200]}')
     res = r.json() or {}
-    words = res.get('words') or []
     try:
-        smpl = [(str((w or {}).get('word') or ''), (w or {}).get('start'), (w or {}).get('end')) for w in (words[:10] or [])]
-        _log_info(f"[ALIGN] response: words={len(words)} sample={smpl}")
+        rw = (res or {}).get('words') or []
+        smpl = [(str((w or {}).get('word') or ''), (w or {}).get('start'), (w or {}).get('end')) for w in (rw[:10] or [])]
+        _log_info(f"[ALIGN] response: words={len(rw)} sample={smpl}")
     except Exception:
         pass
-    return words
+    return res
+
+
+def _alignment_log_dir() -> str:
+    d = current_app.config.get('AUDIO_LOG_DIR') or os.path.join(os.getcwd(), 'audio-log')
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def _safe_name(s: str) -> str:
+    try:
+        s = str(s or '')
+        # Replace path separators and collapse spaces
+        s = s.replace(os.sep, '__').replace('/', '__')
+        s = ' '.join(s.split())
+        # Keep a safe subset; replace others with '_'
+        return ''.join(ch if ch.isalnum() or ch in ('_', '-', '.', '#') else '_' for ch in s)
+    except Exception:
+        return 'unknown'
+
+
+def _save_alignment_artifacts(kind: str, doc: str, seg: Optional[int], ss: float, to: float, wav_bytes: bytes, response_json: dict, src_audio_path: Optional[str] = None) -> None:
+    """Persist the cut audio and raw aligner response for debugging/investigation.
+
+    Files saved under AUDIO_LOG_DIR (or ./audio-log) with a descriptive basename.
+    """
+    try:
+        base_dir = _alignment_log_dir()
+        ts = time.strftime('%Y%m%d-%H%M%S')
+        uid = str(uuid.uuid4())[:8]
+        seg_part = f"seg{int(seg)}" if seg is not None else 'segNA'
+        base = f"{kind}_{_safe_name(doc)}_{seg_part}_{ts}_{uid}_{ss:.3f}-{to:.3f}"
+        wav_path = os.path.join(base_dir, base + '.wav')
+        json_path = os.path.join(base_dir, base + '.response.json')
+        # Write WAV
+        try:
+            with open(wav_path, 'wb') as fh:
+                fh.write(wav_bytes or b'')
+        except Exception:
+            pass
+        # Write JSON
+        try:
+            with open(json_path, 'wb') as fh:
+                fh.write(orjson.dumps(response_json))
+        except Exception:
+            pass
+        # Optionally also save a high-quality/native-rate clip (no downmix/resample)
+        try:
+            if src_audio_path and current_app.config.get('AUDIO_LOG_NATIVE', True):
+                native_path = os.path.join(base_dir, base + '.native.wav')
+                cmd = [
+                    'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                    '-ss', f'{ss:.3f}', '-to', f'{to:.3f}', '-i', src_audio_path,
+                    '-f', 'wav', '-c:a', 'pcm_s16le', native_path
+                ]
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        except Exception:
+            pass
+        _log_info(f"[ALIGN-LOG] saved clip+resp: {wav_path} , {json_path}")
+    except Exception:
+        pass
 
 
 def _build_new_window(words: list, start_seg: int, end_seg: int) -> tuple[list[tuple[int, str, int]], str]:
@@ -312,7 +448,7 @@ def _build_new_window(words: list, start_seg: int, end_seg: int) -> tuple[list[t
             continue
         if seg_idx >= start_seg and seg_idx <= end_seg:
             new_window.append((wi, t, seg_idx))
-    new_transcript = ''.join(t for _, t, _ in new_window)
+    new_transcript = ' '.join(t for _, t, _ in new_window if t and (not str(t).isspace()))
     return new_window, new_transcript
 
 
@@ -322,14 +458,52 @@ def _map_aligned_to_updates(new_window: list[tuple[int,str,int]], resp_words: li
             return str(s or '').strip()
         except Exception:
             return ''
+    # Build comparable sequences (indices + lowercased tokens, excluding empties)
     new_seq = [(i, _norm(t)) for (i, t, _seg) in new_window if _norm(t) != '']
     resp_seq = [((w or {}), _norm((w or {}).get('word'))) for w in (resp_words or []) if _norm((w or {}).get('word')) != '']
-    m = min(len(new_seq), len(resp_seq))
-    updates = []
+    updates: list[tuple[float, float, int]] = []
     matched = 0
-    for k in range(m):
-        wi, _t = new_seq[k]
-        rw, _rt = resp_seq[k]
+
+    # Fallback: aligner returned a single concatenated token; distribute equally/weighted
+    if len(resp_seq) == 1 and len(new_seq) > 1:
+        rw = resp_seq[0][0]
+        try:
+            rs = float(rw.get('start') or 0.0) + offset
+        except Exception:
+            rs = offset
+        try:
+            re = float(rw.get('end') or 0.0) + offset
+        except Exception:
+            re = rs
+        if re <= rs:
+            re = rs + 0.01
+        span = re - rs
+        total_chars = sum(max(1, len(t)) for (_wi, t) in new_seq) or len(new_seq)
+        cur = rs
+        for idx, (wi, t) in enumerate(new_seq):
+            if idx == len(new_seq) - 1:
+                ns = cur
+                ne = re if re > ns else (ns + 0.01)
+            else:
+                frac = (max(1, len(t)) / total_chars)
+                dur = max(0.01, span * frac)
+                ns = cur
+                ne = ns + dur
+                if ne > re:
+                    ne = re
+            updates.append((float(ns), float(ne), int(wi)))
+            matched += 1
+            cur = ne
+        return updates, matched
+
+    # General case: align using difflib to handle insertions/deletions
+    new_tokens = [t for (_wi, t) in new_seq]
+    resp_tokens = [t for (_rw, t) in resp_seq]
+    sm = difflib.SequenceMatcher(a=new_tokens, b=resp_tokens)
+    opcodes = sm.get_opcodes()
+
+    def _resp_time(idx: int) -> tuple[float, float]:
+        rw = resp_seq[idx][0]
         try:
             rs = float(rw.get('start') or 0.0) + offset
         except Exception:
@@ -339,16 +513,35 @@ def _map_aligned_to_updates(new_window: list[tuple[int,str,int]], resp_words: li
         except Exception:
             re = rs
         if not (re > rs):
+            # try next resp start as a bound
             next_rs = None
-            if (k + 1) < m:
+            if (idx + 1) < len(resp_seq):
                 try:
-                    rn = resp_seq[k+1][0]
+                    rn = resp_seq[idx+1][0]
                     next_rs = float(rn.get('start') or 0.0) + offset
                 except Exception:
                     next_rs = None
             re = next_rs if (next_rs is not None and next_rs > rs) else (rs + float(min_dur))
-        updates.append((rs, re, wi))
-        matched += 1
+        return float(rs), float(re)
+
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == 'equal':
+            # one-to-one mapping
+            for k in range(i2 - i1):
+                wi = new_seq[i1 + k][0]
+                rs, re = _resp_time(j1 + k)
+                updates.append((rs, re, int(wi)))
+                matched += 1
+        elif tag in ('replace', 'delete', 'insert'):
+            # best-effort: pair in order up to min length
+            cnt = min(i2 - i1, j2 - j1)
+            for k in range(cnt):
+                wi = new_seq[i1 + k][0]
+                rs, re = _resp_time(j1 + k)
+                updates.append((rs, re, int(wi)))
+                matched += 1
+            # any extra new tokens in this block are left unmatched
+
     return updates, matched
 
 
@@ -363,6 +556,226 @@ def _compute_clip_from_prev_rows(prev_rows) -> tuple[Optional[float], Optional[f
         return None, None
     return float(clip_start), float(clip_end)
 
+
+def _compose_text_from_words(words: list) -> str:
+    out = []
+    for w in (words or []):
+        try:
+            t = str((w or {}).get('word') or '')
+        except Exception:
+            t = ''
+        if t == '\n':
+            continue
+        out.append(t)
+    return ''.join(out)
+
+
+def _compose_full_text_from_words(words: list) -> str:
+    """Compose full text from words including explicit '\n' tokens.
+
+    This preserves segment boundaries in the resulting text. Each token's
+    'word' is concatenated verbatim.
+    """
+    out = []
+    for w in (words or []):
+        try:
+            t = str((w or {}).get('word') or '')
+        except Exception:
+            t = ''
+        out.append(t)
+    return ''.join(out)
+
+
+def _canonicalize_text(s: str) -> str:
+    """Canonicalize text similarly to the client canonicalizeText().
+
+    - Normalize CRLF -> LF
+    - Replace NBSP with regular space
+    - Strip bidi/invisible formatting chars
+    - Trim trailing spaces on each line
+    """
+    try:
+        t = str(s or '')
+        t = t.replace('\r', '')
+        t = t.replace('\u00A0', ' ')
+        t = _re.sub(r"[\u200E\u200F\u202A-\u202E\u2066-\u2069]", "", t)
+        # Trim trailing spaces/tabs per line
+        t = _re.sub(r"[ \t]+$", "", t, flags=_re.MULTILINE)
+        return t
+    except Exception:
+        return str(s or '')
+
+
+def _tokenize_text_to_words(text: str) -> list:
+    """Tokenize text into words while preserving whitespace runs and newlines.
+
+    - Emits non-whitespace runs verbatim as tokens
+    - Emits whitespace runs (spaces/tabs etc.) as separate tokens to preserve spacing
+    - Emits a {'word': '\n'} token between lines to preserve segment boundaries
+    - No timings/probabilities are set here
+    """
+    words = []
+    for line in (text or '').splitlines():
+        buf = ''
+        is_space = None
+        for ch in line:
+            ch_is_space = ch.isspace() and ch != '\n'
+            if is_space is None:
+                buf = ch
+                is_space = ch_is_space
+            elif ch_is_space == is_space:
+                buf += ch
+            else:
+                if buf:
+                    words.append({'word': buf})
+                buf = ch
+                is_space = ch_is_space
+        if buf:
+            words.append({'word': buf})
+        # segment separator
+        words.append({'word': '\n'})
+    return words
+
+
+def _explode_resp_words_if_needed(resp_words: list) -> list:
+    """If the aligner returns a single concatenated token, split into word tokens.
+
+    Distributes the time range linearly by character length across non-space pieces.
+    """
+    try:
+        if not resp_words:
+            return resp_words
+        # If already multiple tokens with reasonable lengths, keep as-is
+        if len(resp_words) > 1:
+            return resp_words
+        rw = resp_words[0] or {}
+        t = str(rw.get('word') or '')
+        s = rw.get('start', None); e = rw.get('end', None)
+        if not t or s is None or e is None:
+            return resp_words
+        # If contains internal whitespace, split
+        pieces = [p for p in _re.split(r"\s+", t) if p]
+        if len(pieces) <= 1:
+            return resp_words
+        total_chars = sum(len(p) for p in pieces) or 1
+        out = []
+        cur = float(s)
+        span = max(0.0, float(e) - float(s))
+        for i, p in enumerate(pieces):
+            frac = (len(p) / total_chars)
+            dur = span * frac
+            ns = cur
+            ne = cur + dur
+            if ne <= ns:
+                ne = ns + 0.01
+            out.append({'word': p, 'start': ns, 'end': ne})
+            cur = ne
+        return out
+    except Exception:
+        return resp_words
+
+
+def _ensure_words_match_text(text: str, words: list) -> list:
+    """Ensure the words tokens reflect the current text content without discarding timings.
+
+    Behavior changes:
+    - If any incoming token carries timing/probability metadata, trust the provided words as-is
+      (skip retokenization) to avoid losing alignment on first save.
+    - Otherwise, compare text vs. composed words using a whitespace-tolerant canonical form
+      (collapsing runs, trimming edges, removing bidi/NBSP/newlines). Only retokenize when the
+      canonical contents differ.
+    """
+    def _canon_relaxed(s: str) -> str:
+        try:
+            t = str(s or '')
+            # Normalize CRLF -> LF
+            t = t.replace('\r', '')
+            # Replace NBSP with regular space
+            t = t.replace('\u00A0', ' ')
+            # Strip bidi/invisible formatting chars (LRM/RLM/embeddings/isolates)
+            t = _re.sub(r"[\u200E\u200F\u202A-\u202E\u2066-\u2069]", "", t)
+            # Remove explicit newlines for comparison
+            t = t.replace('\n', ' ')
+            # Collapse all whitespace runs to a single space
+            t = _re.sub(r"\s+", " ", t)
+            # Trim leading/trailing spaces
+            t = t.strip()
+            # Unicode normalization to NFC to avoid canonically equivalent mismatches
+            try:
+                t = t.normalize('NFC') if hasattr(t, 'normalize') else t
+            except Exception:
+                pass
+            return t
+        except Exception:
+            return str(s or '')
+
+    # 1) If words already include any timing/probability, keep them intact to preserve metadata
+    try:
+        for w in (words or []):
+            if not isinstance(w, dict):
+                continue
+            if (w.get('start') is not None) or (w.get('end') is not None) or (w.get('probability') is not None):
+                return words
+    except Exception:
+        # If inspection fails, fall back to relaxed comparison path below
+        pass
+
+    # 2) Whitespace-tolerant comparison when no timings exist
+    try:
+        ws = _compose_text_from_words(words or [])
+        if _canon_relaxed(ws) == _canon_relaxed(text):
+            return words
+    except Exception:
+        pass
+    # 3) Retokenize only when content differs materially
+    return _tokenize_text_to_words(text)
+
+
+def _validate_and_sanitize_words(words: list) -> list:
+    """Validate that words is a list of dict items with expected fields.
+
+    Ensures each item is a dict, has a string 'word', and optional numeric
+    'start', 'end', 'probability' (or None). Returns a sanitized shallow copy.
+    Aborts with 400 if structure is invalid.
+    """
+    if not isinstance(words, list):
+        abort(400, 'words must be an array')
+    out = []
+    for i, w in enumerate(words):
+        if not isinstance(w, dict):
+            abort(400, f'words[{i}] must be an object')
+        word_val = w.get('word')
+        try:
+            word_str = str(word_val or '')
+        except Exception:
+            abort(400, f'words[{i}].word must be string')
+        # Allow newline tokens
+        s = w.get('start', None)
+        e = w.get('end', None)
+        p = w.get('probability', None)
+        # Coerce numeric-like values; allow None
+        def _to_float_or_none(v):
+            if v is None or v == '':
+                return None
+            try:
+                val = float(v)
+                # Treat NaN/inf as None
+                if val != val or val == float('inf') or val == float('-inf'):
+                    return None
+                # Disallow negatives; clamp to 0.0
+                if val < 0:
+                    return 0.0
+                return val
+            except Exception:
+                abort(400, f'words[{i}] timing/probability must be number or null')
+        s_f = _to_float_or_none(s)
+        e_f = _to_float_or_none(e)
+        p_f = _to_float_or_none(p)
+        # If both present and end < start, drop end to let normalizer fix
+        if s_f is not None and e_f is not None and e_f < s_f:
+            e_f = None
+        out.append({'word': word_str, 'start': s_f, 'end': e_f, 'probability': p_f})
+    return out
 
 def _segment_window(seg_hint, neighbors: int) -> tuple[int, int]:
     seg = int(seg_hint)
@@ -390,6 +803,9 @@ def _check_save_conflict(db: DatabaseService, doc: str, latest: Optional[dict], 
 
     This centralizes the branching logic used to gate concurrent saves.
     """
+    # Canonicalize client text once for any diffs we might produce
+    client_text_canon = _canonicalize_text(text or '')
+
     if not latest:
         # First version can proceed if parent is None/0.
         if parent_version not in (None, 0, '0'):
@@ -402,44 +818,50 @@ def _check_save_conflict(db: DatabaseService, doc: str, latest: Optional[dict], 
     # When the parent is specified, the client should send expected_base_sha256
     if not expected_base_sha256:
         base = _row_for_version(db, doc, int(parent_version)) or {"text": ""}
+        base_text = _canonicalize_text(base.get('text') or '')
+        latest_text = _canonicalize_text((latest or {}).get('text') or '')
         return {
             "reason": "hash_missing",
             "latest": latest,
             "parent": {
                 "version": int(parent_version),
-                "base_sha256": _sha256_hex(base.get('text') or ''),
+                "base_sha256": _sha256_hex(base_text),
                 "text": base.get('text') or ''
             },
-            "diff_parent_to_latest": _diff(base.get('text') or '', latest.get('text') or ''),
-            "diff_parent_to_client": _diff(base.get('text') or '', text or '')
+            "diff_parent_to_latest": _diff(base_text, latest_text),
+            "diff_parent_to_client": _diff(base_text, client_text_canon)
         }
 
     if int(parent_version) != int(latest['version']):
         base = _row_for_version(db, doc, int(parent_version)) or {"text": ""}
+        base_text = _canonicalize_text(base.get('text') or '')
+        latest_text = _canonicalize_text((latest or {}).get('text') or '')
         return {
             "reason": "version_conflict",
             "latest": latest,
             "parent": {
                 "version": int(parent_version),
-                "base_sha256": _sha256_hex(base.get('text') or ''),
+                "base_sha256": _sha256_hex(base_text),
                 "text": base.get('text') or ''
             },
-            "diff_parent_to_latest": _diff(base.get('text') or '', latest.get('text') or ''),
-            "diff_parent_to_client": _diff(base.get('text') or '', text or '')
+            "diff_parent_to_latest": _diff(base_text, latest_text),
+            "diff_parent_to_client": _diff(base_text, client_text_canon)
         }
 
     if expected_base_sha256 and expected_base_sha256 != str(latest['base_sha256']):
         base = _row_for_version(db, doc, int(parent_version)) or {"text": ""}
+        base_text = _canonicalize_text(base.get('text') or '')
+        latest_text = _canonicalize_text((latest or {}).get('text') or '')
         return {
             "reason": "hash_conflict",
             "latest": latest,
             "parent": {
                 "version": int(parent_version),
-                "base_sha256": _sha256_hex(base.get('text') or ''),
+                "base_sha256": _sha256_hex(base_text),
                 "text": base.get('text') or ''
             },
-            "diff_parent_to_latest": _diff(base.get('text') or '', latest.get('text') or ''),
-            "diff_parent_to_client": _diff(base.get('text') or '', text or '')
+            "diff_parent_to_latest": _diff(base_text, latest_text),
+            "diff_parent_to_client": _diff(base_text, client_text_canon)
         }
     return None
 
@@ -476,7 +898,13 @@ def _prealign_updates(db: DatabaseService, doc: str, latest: Optional[dict], wor
 
         # Extract WAV clip via ffmpeg and call endpoint
         wav_bytes, ss, to = _ffmpeg_extract_wav_clip(audio_path, clip_start, clip_end, pad=0.10)
-        resp_words = _align_call(wav_bytes, new_transcript)
+        align_res = _align_call(wav_bytes, new_transcript)
+        resp_words = (align_res or {}).get('words') or []
+        resp_words = _explode_resp_words_if_needed(resp_words)
+        try:
+            _save_alignment_artifacts('prealign', doc, int(seg_hint), ss, to, wav_bytes, align_res, src_audio_path=audio_path)
+        except Exception:
+            pass
 
         # Map response words to updates; ensure non-zero durations
         updates, matched = _map_aligned_to_updates(new_window, resp_words, ss, min_dur=0.20)
@@ -725,6 +1153,42 @@ def _slice_words_json(words: list, seg: int, end_seg: int) -> list:
     return out
 
 
+def _normalize_words_json_all(words: list) -> list:
+    """Normalize full JSON `words` list to the same shape as DB path.
+
+    - Preserves pure whitespace tokens and '\n' separators
+    - Ensures numeric start/end defaults
+    - Inserts newline tokens with zero-duration using previous end time when present
+    """
+    out = []
+    prev_end = 0.0
+    for w in (words or []):
+        if not w:
+            continue
+        try:
+            word_val = str((w or {}).get('word') or '')
+        except Exception:
+            word_val = ''
+        if word_val == '\n':
+            out.append({"word": "\n", "start": prev_end, "end": prev_end, "probability": None})
+            continue
+        # Preserve whitespace runs as tokens
+        try:
+            s = float(w.get('start') or 0.0)
+        except Exception:
+            s = 0.0
+        try:
+            e = float(w.get('end') if w.get('end') is not None else s)
+        except Exception:
+            e = s
+        try:
+            p = (float(w.get('probability')) if (w.get('probability') is not None and w.get('probability') != '') else None)
+        except Exception:
+            p = None
+        out.append({"word": word_val, "start": s, "end": e, "probability": p})
+        prev_end = e
+    return out
+
 def _latest_row(db: DatabaseService, file_path: str) -> Optional[dict]:
     cur = db.execute(
         "SELECT version, base_sha256, text, words, COALESCE(created_by,'') FROM transcripts WHERE file_path=? ORDER BY version DESC LIMIT 1",
@@ -778,6 +1242,7 @@ def _populate_transcript_words(db: DatabaseService, doc: str, version: int, word
         if word == '\n':
             seg_idx += 1
             continue
+        # Preserve pure whitespace tokens as first-class rows to avoid collapsing spacing on reload
         start = w.get('start', None)
         end = w.get('end', None)
         prob = w.get('probability', None)
@@ -808,31 +1273,41 @@ def _normalize_end_times(db: DatabaseService, doc: str, version: int, min_dur: f
         [doc, int(version)]
     )
     rows = cur.fetchall() or []
-    updated = []
+    updated = []  # (start_time, end_time, doc, version, word_index)
     # Group by segment
-    seg_map = {}
+    seg_map: dict[int, list[tuple[int, Optional[float], Optional[float]]]] = {}
     for seg, wi, st, en in rows:
-        seg_map.setdefault(int(seg), []).append([int(wi), float(st) if st is not None else 0.0, float(en) if en is not None else None])
+        seg_map.setdefault(int(seg), []).append((int(wi), (float(st) if st is not None else None), (float(en) if en is not None else None)))
     for seg, items in seg_map.items():
         n = len(items)
+        prev_end: Optional[float] = None
+        # Build lookahead starts for efficiency
+        starts = [items[i][1] for i in range(n)]
         for i in range(n):
-            wi, s, e = items[i]
-            # Compute target end
-            te = e if (e is not None and e > s) else None
-            if te is None:
-                # next token start within segment if greater
-                ns = None
-                for j in range(i+1, n):
-                    ns_candidate = items[j][1]
-                    if ns_candidate > s:
-                        ns = ns_candidate; break
-                te = ns if (ns is not None) else (s + float(min_dur))
-            # Update if changed or invalid
-            if e is None or te > e or e <= s:
-                updated.append((float(te), doc, int(version), int(wi)))
+            wi, s_raw, e_raw = items[i]
+            # derive start: prefer given; else previous end; else 0.0
+            s = s_raw if s_raw is not None else (prev_end if prev_end is not None else 0.0)
+            # find next known start strictly greater than s for lookahead
+            next_start = None
+            for j in range(i+1, n):
+                ns = starts[j]
+                if ns is not None and ns > s:
+                    next_start = ns
+                    break
+            # derive end: use given if valid; else next_start; else s + min_dur
+            if e_raw is not None and e_raw > s:
+                e = e_raw
+            else:
+                e = next_start if (next_start is not None) else (s + float(min_dur))
+            # track prev_end for subsequent missing-start tokens
+            prev_end = e
+            # decide if update needed
+            need_update = (s_raw is None) or (e_raw is None) or (e_raw <= (s_raw if s_raw is not None else s)) or (e != e_raw) or (s_raw is None)
+            if need_update:
+                updated.append((float(s), float(e), doc, int(version), int(wi)))
     if updated:
         db.batch_execute(
-            "UPDATE transcript_words SET end_time=? WHERE file_path=? AND version=? AND word_index=?",
+            "UPDATE transcript_words SET start_time=?, end_time=? WHERE file_path=? AND version=? AND word_index=?",
             updated
         )
     return len(updated)
@@ -842,6 +1317,7 @@ def get_latest():
     doc = request.args.get('doc', '').strip()
     if not doc:
         abort(400, 'missing ?doc=')
+    _ensure_safe_doc(doc)
     db = _db(); _ensure_schema(db)
     row = _latest_row(db, doc)
     return jsonify(row or {})
@@ -853,6 +1329,7 @@ def get_version():
     version = request.args.get('version', '').strip()
     if not doc or not version.isdigit():
         abort(400, 'missing ?doc= and/or ?version=')
+    _ensure_safe_doc(doc)
     db = _db(); _ensure_schema(db)
     row = _row_for_version(db, doc, int(version))
     if not row:
@@ -872,8 +1349,12 @@ def save_version():
     neighbors = _clamp_neighbors(body.get('neighbors', 1) or 1)
     if not doc:
         abort(400, 'missing doc')
+    _ensure_safe_doc(doc)
     if not isinstance(words, list):
         abort(400, 'words must be an array')
+    _ensure_safe_doc(doc)
+    # Validate input words structure early
+    words = _validate_and_sanitize_words(words)
 
     db = _db(); _ensure_schema(db)
     latest = _latest_row(db, doc)
@@ -885,12 +1366,18 @@ def save_version():
             return ("invalid parentVersion for first save", 400)
         return (jsonify(conflict_payload), 409)
 
-    # Compute new version + hash of new text
+    # Compute new version (hash computed later from recomposed text)
     new_version = (latest['version'] + 1) if latest else 1
-    new_hash = _sha256_hex(text)
 
+    # Ensure client words reflect the edited text; if not, retokenize from text
+    words = _ensure_words_match_text(text, words)
+    # Re-sanitize after potential retokenization
+    words = _validate_and_sanitize_words(words)
     # Serialize words for storage (will update after carry-over enrichment)
-    words_json = orjson.dumps(words).decode('utf-8')
+    try:
+        words_json = orjson.dumps(words).decode('utf-8')
+    except Exception:
+        words_json = orjson.dumps(words or []).decode('utf-8')
     try:
         _wt = 0
         for _w in (words or []):
@@ -904,8 +1391,21 @@ def save_version():
     except Exception:
         pass
 
-    updates, token_ops_block = _prealign_updates(db, doc, latest, words, seg_hint, neighbors)
+    if current_app.config.get('ALIGN_PREALIGN_ON_SAVE', True):
+        updates, token_ops_block = _prealign_updates(db, doc, latest, words, seg_hint, neighbors)
+    else:
+        updates, token_ops_block = [], None
     words, words_json = _carry_over_timings(db, doc, latest, words)
+
+    # Recompose authoritative text from words and canonicalize for storage + hashing
+    try:
+        recomposed_text = _compose_full_text_from_words(words)
+        store_text = _canonicalize_text(recomposed_text)
+    except Exception:
+        # Fallback to client-provided text (canonicalized)
+        store_text = _canonicalize_text(text)
+    # Compute child hash from canonicalized text
+    new_hash = _sha256_hex(store_text)
 
     # Begin transaction
     db.execute("BEGIN TRANSACTION")
@@ -913,7 +1413,7 @@ def save_version():
         user_email = session.get('user_email', '')
         db.execute(
             "INSERT INTO transcripts (file_path, version, base_sha256, text, words, created_by) VALUES (?, ?, ?, ?, ?, ?)",
-            [doc, new_version, new_hash, text, words_json, user_email]
+            [doc, new_version, new_hash, store_text, words_json, user_email]
         )
         # Populate normalized words rows for this version
         _populate_transcript_words(db, doc, new_version, words)
@@ -931,7 +1431,7 @@ def save_version():
 
         # Store edit deltas relative to parent (if exists)
         if latest:
-            d_parent = _diff(latest['text'] or '', text)
+            d_parent = _diff(latest['text'] or '', store_text)
             db.execute(
                 "INSERT OR REPLACE INTO transcript_edits (file_path, parent_version, child_version, dmp_patch, token_ops) VALUES (?, ?, ?, ?, ?)",
                 [doc, int(latest['version']), new_version, d_parent, orjson.dumps(token_ops_block).decode('utf-8') if token_ops_block else None]
@@ -941,7 +1441,7 @@ def save_version():
         if latest and latest['version'] >= 1:
             v1 = _row_for_version(db, doc, 1)
             if v1:
-                d_origin = _diff(v1['text'] or '', text)
+                d_origin = _diff(v1['text'] or '', store_text)
                 db.execute(
                     "INSERT OR REPLACE INTO transcript_edits (file_path, parent_version, child_version, dmp_patch, token_ops) VALUES (?, ?, ?, ?, ?)",
                     [doc, 1, new_version, d_origin, None]
@@ -989,6 +1489,7 @@ def list_edits():
 
 @bp.route('/align_segment', methods=['POST'])
 def align_segment():
+    _t0 = time.time()
     body = request.get_json(force=True, silent=False) or {}
     doc = (body.get('doc') or '').strip()
     version = body.get('version', None)
@@ -1002,6 +1503,7 @@ def align_segment():
     if neighbors > 3: neighbors = 3
     if not doc or seg is None:
         abort(400, 'missing doc/segment')
+    _ensure_safe_doc(doc)
 
     db = _db(); _ensure_schema(db)
     # Resolve version (latest if not provided)
@@ -1044,7 +1546,7 @@ def align_segment():
         if en is not None:
             clip_end = en if clip_end is None else max(clip_end, float(en))
 
-    transcript = ''.join(w['word'] for w in words)
+    transcript = ' '.join(str(w.get('word') or '') for w in words if str(w.get('word') or '') != '\n')
     # Debug: window stats
     try:
         nonspace = [w for w in words if not (w.get('word') or '').isspace()]
@@ -1093,7 +1595,13 @@ def align_segment():
         return (f'ffmpeg failed: {getattr(e, "stderr", b"\"").decode("utf-8", "ignore")}', 500)
 
     try:
-        resp_words = _align_call(wav_bytes, transcript)
+        align_res = _align_call(wav_bytes, transcript)
+        resp_words = (align_res or {}).get('words') or []
+        resp_words = _explode_resp_words_if_needed(resp_words)
+        try:
+            _save_alignment_artifacts('align', doc, int(seg), ss, to, wav_bytes, align_res, src_audio_path=audio_path)
+        except Exception:
+            pass
     except Exception as e:
         return (f'align request failed: {e}', 502)
 
@@ -1149,7 +1657,7 @@ def align_segment():
     # Persist timing updates for matched tokens (so inserts around the window still benefit)
     if updates:
         try:
-            db.execute("BEGIN TRANSACTION")
+            db.execute("BEGIN IMMEDIATE TRANSACTION")
             db.batch_execute(
                 "UPDATE transcript_words SET start_time=?, end_time=? WHERE file_path=? AND version=? AND word_index=?",
                 updates
@@ -1165,6 +1673,8 @@ def align_segment():
     # Update transcript_edits.token_ops for parent->child
     parent_version = max(0, version - 1)
     try:
+        # Serialize read+write of transcript_edits to avoid lost updates
+        db.execute("BEGIN IMMEDIATE TRANSACTION")
         cur = db.execute(
             "SELECT dmp_patch, token_ops FROM transcript_edits WHERE file_path=? AND parent_version=? AND child_version=?",
             [doc, parent_version, version]
@@ -1203,6 +1713,10 @@ def align_segment():
         db.execute("ROLLBACK")
         raise
 
+    try:
+        _log_info(f"[ALIGN] align_segment elapsed_ms={(time.time()-_t0)*1000:.1f} matched={matched} diffs={len(diffs)}")
+    except Exception:
+        pass
     return jsonify({
         'ok': True,
         'changed_count': len([d for d in diffs if abs(d.get('delta_start', 0)) > 1e-3 or abs(d.get('delta_end', 0)) > 1e-3]),
@@ -1217,6 +1731,7 @@ def migrate_words():
     version = body.get('version', None)
     if not doc:
         abort(400, 'missing doc')
+    _ensure_safe_doc(doc)
     db = _db(); _ensure_schema(db)
 
     def _synth_words(text: str) -> list:
@@ -1268,6 +1783,7 @@ def get_confirmations():
     version = request.args.get('version', '').strip()
     if not doc or not version.isdigit():
         abort(400, 'missing ?doc= and/or ?version=')
+    _ensure_safe_doc(doc)
     db = _db(); _ensure_schema(db)
     cur = db.execute(
         "SELECT id, start_offset, end_offset, prefix, exact, suffix FROM transcript_confirmations WHERE file_path=? AND version=? ORDER BY start_offset ASC",
@@ -1290,6 +1806,7 @@ def history():
     doc = request.args.get('doc', '').strip()
     if not doc:
         abort(400, 'missing ?doc=')
+    _ensure_safe_doc(doc)
     db = _db(); _ensure_schema(db)
 
     # Load all transcript versions
@@ -1304,9 +1821,13 @@ def history():
     if not rows:
         return jsonify([])
 
-    # Load explicit parent->child edges (if any)
+    # Load explicit immediate parent->child edges (exclude origin/summary links)
     cur2 = db.execute(
-        "SELECT parent_version, child_version FROM transcript_edits WHERE file_path=?",
+        """
+        SELECT parent_version, child_version
+        FROM transcript_edits
+        WHERE file_path=? AND parent_version = child_version - 1
+        """,
         [doc]
     )
     edges = cur2.fetchall() or []
@@ -1338,6 +1859,7 @@ def get_words():
     count_q = request.args.get('count', '').strip()
     if not doc or not version.isdigit():
         abort(400, 'missing ?doc= and/or ?version=')
+    _ensure_safe_doc(doc)
     db = _db(); _ensure_schema(db)
     # Build segment filter
     seg_filter_sql, extra_params, window = _build_segment_filter(seg_q, count_q)
@@ -1371,7 +1893,9 @@ def get_words():
         seg, end_seg = window  # type: ignore
         out = _slice_words_json(words, int(seg), int(end_seg))
         return jsonify(out)
-    return jsonify(words)
+    # Normalize entire JSON words list to match DB path shape
+    out = _normalize_words_json_all(words)
+    return jsonify(out)
 
 
 @bp.route('/confirmations/save', methods=['POST'])
@@ -1383,6 +1907,7 @@ def save_confirmations():
     items = body.get('items', [])
     if not doc or not version:
         abort(400, 'missing doc/version')
+    _ensure_safe_doc(doc)
     if not base_sha256:
         abort(400, 'missing base_sha256')
     if not isinstance(items, list):
@@ -1396,10 +1921,14 @@ def save_confirmations():
     if str(row['base_sha256']) != base_sha256:
         return ("hash conflict: confirmations base_sha256 mismatch", 409)
 
-    # Replace confirmations transactionally
-    db.execute("BEGIN TRANSACTION")
+    # Replace confirmations transactionally; IMMEDIATE prevents concurrent writers
+    db.execute("BEGIN IMMEDIATE TRANSACTION")
     try:
-        db.execute("DELETE FROM transcript_confirmations WHERE file_path=? AND version=?", [doc, int(version)])
+        # Guard delete by base_sha256 to avoid racing with an unexpected hash change
+        db.execute(
+            "DELETE FROM transcript_confirmations WHERE file_path=? AND version=? AND base_sha256=?",
+            [doc, int(version), row['base_sha256']]
+        )
         for it in items:
             s = int(it.get('start_offset') or 0)
             e = int(it.get('end_offset') or s)

@@ -102,7 +102,7 @@ function setSelectionByOffsets(container, start, end) {
 
 // Layer view integration hooks (weak-coupled)
 let _showingLayers = false; export function setShowingLayers(on){ _showingLayers = !!on; }
-function isShowingLayers(){ return _showingLayers; }
+export function isShowingLayers(){ return _showingLayers; }
 function hideLayers(){ _showingLayers = false; }
 
 // Typing quiet window registry (shared through closures)

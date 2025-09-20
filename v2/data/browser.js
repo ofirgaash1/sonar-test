@@ -3,7 +3,7 @@
 
 import { store } from '../core/state.js';
 import { showToast } from '../ui/toast.js';
-import { listFolders, listFiles, loadEpisode, hasCorrection, getConfirmations } from '../data/api.js';
+import { listFolders, listFiles, loadEpisode, hasCorrection, getConfirmations, getLatestTranscript } from '../data/api.js';
 
 export function setupBrowser(els, { bumpEditGen } = {}) {
   if (!els?.folders || !els?.files) return;
@@ -45,9 +45,7 @@ export function setupBrowser(els, { bumpEditGen } = {}) {
       if (!files.length) { els.files.innerHTML = '<div class="item">אין קבצים</div>'; return; }
       els.files.innerHTML = files.map(file => {
         const display = file.name.replace(/\.opus$/i, '');
-        const hasCorr = hasCorrection(`${folderName}/${file.name}`);
-        const correctionClass = hasCorr ? 'has-correction' : 'no-correction';
-        return `<div class="item ${correctionClass}" data-file="${file.name}">🎵 ${display}</div>`;
+        return `<div class="item" data-file="${file.name}">🎵 ${display}</div>`;
       }).join('');
       els.files.querySelectorAll('.item').forEach(item => {
         item.addEventListener('click', () => {
@@ -57,6 +55,34 @@ export function setupBrowser(els, { bumpEditGen } = {}) {
           loadEpisodeFile(folderName, item.dataset.file);
         });
       });
+      // After render: compute green/red badges by querying backend latest versions
+      try {
+        const items = Array.from(els.files.querySelectorAll('.item'));
+        // Prefill from local cache immediately if available
+        for (const it of items) {
+          const file = it.dataset.file; const doc = `${folderName}/${file}`;
+          if (hasCorrection(doc)) it.classList.add('has-correction');
+        }
+        // Query backend in small batches
+        const limit = 6; let idx = 0;
+        async function runBatch(){
+          const batch = [];
+          for (let k = 0; k < limit && idx < items.length; k++, idx++) {
+            const it = items[idx]; const file = it.dataset.file; const doc = `${folderName}/${file}`;
+            it.classList.add('loading');
+            batch.push(getLatestTranscript(doc).then(r => ({ it, ver: (r && Number.isFinite(+r.version) ? +r.version : 0) })).catch(() => ({ it, ver: 0 })));
+          }
+          const res = await Promise.all(batch);
+          for (const { it, ver } of res) {
+            it.classList.remove('loading');
+            it.classList.remove('has-correction');
+            it.classList.remove('no-correction');
+            if (ver > 0) it.classList.add('has-correction'); else it.classList.add('no-correction');
+          }
+          if (idx < items.length) await runBatch();
+        }
+        await runBatch();
+      } catch (e) { console.warn('Failed to refresh correction badges', e); }
     } catch (error) {
       console.error('Failed to load files:', error);
       els.files.innerHTML = '<div class="item error">שגיאה בטעינת קבצים</div>';

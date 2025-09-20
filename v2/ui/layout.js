@@ -1,5 +1,6 @@
 // v2/ui/layout.js
 // Scroll sync between panes and resizable gutters with persisted widths
+import { isShowingLayers } from '../editor/pipeline.js';
 
 export function setupScrollSync(els) {
   const trScroll = document.querySelector('#transcriptCard .body') || els.transcript;
@@ -8,6 +9,14 @@ export function setupScrollSync(els) {
 
   let lock = 0;
   const sync = (src, dst) => {
+    // Only sync when Diff tab is active and layers view is not shown
+    try {
+      const tabDiff = document.getElementById('tabDiff');
+      const isDiffTab = !!(tabDiff && tabDiff.getAttribute('aria-selected') === 'true');
+      if (!isDiffTab) return;
+      if (typeof isShowingLayers === 'function' && isShowingLayers()) return;
+    } catch {}
+
     if (lock) return;
     lock = 1;
     const srcMax = Math.max(1, src.scrollHeight - src.clientHeight);

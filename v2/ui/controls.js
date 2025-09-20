@@ -348,10 +348,14 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
       }
       // Provide expectedBaseSha256 for authoritative hash-gate on backend: hash of parent text
       const expectedBaseSha256 = (latest?.text != null) ? await sha256Hex(String(latest.text)) : '';
-      // Prefer building words from tokens to preserve timings for unchanged tokens
-      let wordsForSave = buildWordsForSaveFromTokens(tokens);
+      // Build words from the edited text, attempting to carry timings
+      // from the current tokens where pieces match exactly.
+      // This ensures the saved words reflect user text changes (e.g., מפתחים→מבטחים)
+      // while preserving timings for unchanged tokens.
+      let wordsForSave = buildWordsForSaveFromText(text);
       const stats = computeWindowStats(tokens, segIdxGuess, 1);
       dbg(`[dbg] save:start tokens=${tokens.length} with_timing=${countWithTimings(tokens)} seg=${segIdxGuess} window_words=${stats.words} window_sec=${stats.seconds.toFixed(3)}`);
+      // Show a generic toast before save; detailed toast will be shown right before align
       openAlignToast();
       const res = await saveTranscriptVersion(filePath, { parentVersion: parentVersionGuess, text, words: wordsForSave, expectedBaseSha256, segment: Math.max(0, segIdxGuess), neighbors: 1 });
       const childV = res?.version; const parentV = (typeof childV === 'number' && childV > 1) ? (childV - 1) : null;
@@ -361,8 +365,12 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
       try {
         if (typeof childV === 'number') {
           let alignMsg = null, alignType = 'info';
-          // Show immediate align toast with window stats (request start)
-          openAlignToast(stats.words || 0, stats.seconds || 0);
+          // Show immediate align toast with window stats (request start); avoid 0/0 placeholder
+          if ((stats.words > 0) && (stats.seconds > 0)) {
+            openAlignToast(stats.words, stats.seconds);
+          } else {
+            openAlignToast();
+          }
           try {
             const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
             const ar = await alignSegment(filePath, { version: childV, segment: Math.max(0, segIdxGuess), neighbors: 1 });

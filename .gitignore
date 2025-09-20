@@ -8,3 +8,5 @@ explore.sqlite-wal
 *.sqlite-shm
 *.sqlite-wal
 explore/app/__pycache__/
+/audio-log
+*.log

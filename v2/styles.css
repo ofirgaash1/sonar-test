@@ -393,8 +393,8 @@ header {
   border: 1px dashed var(--border);
   border-radius: .5rem;
   padding: .25rem;
-  overflow: auto;
-  /* independent scroll */
+  /* Let the card body manage scrolling for the browser card */
+  overflow: visible;
   min-height: 0;
 }
 
@@ -460,7 +460,8 @@ header {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden; /* inner panels manage their own scroll */
+  /* match transcript/diff: card body scrolls */
+  overflow: auto;
 }
 #panelBrowser,
 #panelSearch {

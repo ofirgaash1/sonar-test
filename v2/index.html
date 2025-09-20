@@ -51,14 +51,16 @@
 
   <!-- Main 3-column panel with resizable gutters -->
   <main id="panel">
-    
+
 
     <!-- Browser (folders/files) -->
     <section class="card" id="browserCard" aria-labelledby="browserCardTitle">
       <div class="head">
         <div class="tabs" role="tablist" aria-label="nav">
-          <button id="tabBrowser" class="tab-btn" role="tab" aria-selected="true" aria-controls="panelBrowser">דפדוף</button>
-          <button id="tabSearch" class="tab-btn" role="tab" aria-selected="false" aria-controls="panelSearch">חיפוש</button>
+          <button id="tabBrowser" class="tab-btn" role="tab" aria-selected="true"
+            aria-controls="panelBrowser">דפדוף</button>
+          <button id="tabSearch" class="tab-btn" role="tab" aria-selected="false"
+            aria-controls="panelSearch">חיפוש</button>
         </div>
       </div>
 
@@ -75,7 +77,8 @@
             <button id="searchBtn" class="pill" type="button">חפש</button>
           </div>
           <div id="searchResults" class="list" aria-label="תוצאות חיפוש" style="margin-top:8px;"></div>
-          <div class="pager" id="searchPager" role="navigation" aria-label="ניווט תוצאות" style="margin-top:8px;display:flex;gap:8px;">
+          <div class="pager" id="searchPager" role="navigation" aria-label="ניווט תוצאות"
+            style="margin-top:8px;display:flex;gap:8px;">
             <button id="searchPrev" class="pill" type="button">קודם</button>
             <span id="searchPageInfo" class="hint"></span>
             <button id="searchNext" class="pill" type="button">הבא</button>
@@ -113,18 +116,17 @@
     <div id="gutterL" class="gutter" role="separator" aria-orientation="vertical" tabindex="0"
       aria-label="שינוי רוחב אזור ההשוואה"></div>
 
-    
 
-  <!-- Diff / History -->
-  <section class="card" id="diffCard" aria-labelledby="diffCardTitle">
+
+    <!-- Diff / History -->
+    <section class="card" id="diffCard" aria-labelledby="diffCardTitle">
       <div class="head">
         <div class="tabs" role="tablist" aria-label="diff-history">
-          <button id="tabDiff" class="tab-btn" role="tab" aria-selected="true" aria-controls="panelDiff">השוואות</button>
-          <button id="tabHistory" class="tab-btn" role="tab" aria-selected="false" aria-controls="panelHistory">היסטוריה</button>
-        </div>
-        <div class="actions" role="group" aria-label="פקדי השוואה">
-          <button id="showLayersBtn" class="pill" type="button" title="הצג שכבות שינויים">הצג שכבות שינויים</button>
-        </div>
+          <button id="tabDiff" class="tab-btn" role="tab" aria-selected="true"
+            aria-controls="panelDiff">השוואות</button>
+          <button id="tabHistory" class="tab-btn" role="tab" aria-selected="false"
+            aria-controls="panelHistory">היסטוריה</button>
+          <button id="showLayersBtn" class="tab-btn" type="button" title="שכבות שינויים">שכבות שינויים</button>
       </div>
       <div class="body">
         <div id="panelDiff" class="tab-panel" role="tabpanel" aria-labelledby="tabDiff">
@@ -134,10 +136,10 @@
           <div id="historyList" class="list" aria-label="רשימת גרסאות"></div>
         </div>
       </div>
-  </section>
+    </section>
 
-  <!-- History sidebar -->
-  
+    <!-- History sidebar -->
+
   </main>
 
   <!-- Back-to-top floating button -->
@@ -160,11 +162,13 @@
         <div class="grid" style="grid-template-columns:1fr 1fr; gap:8px;">
           <div>
             <h4 style="margin-top:0">בסיס → העדכנית</h4>
-            <pre id="diffParentLatest" style="white-space:pre-wrap; background:var(--bg-2); padding:8px; border-radius:6px;"></pre>
+            <pre id="diffParentLatest"
+              style="white-space:pre-wrap; background:var(--bg-2); padding:8px; border-radius:6px;"></pre>
           </div>
           <div>
             <h4 style="margin-top:0">בסיס → השינויים שלי</h4>
-            <pre id="diffParentClient" style="white-space:pre-wrap; background:var(--bg-2); padding:8px; border-radius:6px;"></pre>
+            <pre id="diffParentClient"
+              style="white-space:pre-wrap; background:var(--bg-2); padding:8px; border-radius:6px;"></pre>
           </div>
         </div>
       </div>
@@ -184,8 +188,3 @@
 </body>
 
 </html>
-
-
-
-
-

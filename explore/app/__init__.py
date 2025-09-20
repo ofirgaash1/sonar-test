@@ -36,6 +36,18 @@ def create_app(data_dir: str, index_file: str = None):
     app.config['ANALYTICS_SERVICE'] = analytics_service
     
     app.config['MIME_TYPES'] = {'opus': 'audio/opus'}
+
+    # Alignment and logging configuration (env overridable)
+    def _env_bool(name: str, default: bool) -> bool:
+        v = os.environ.get(name)
+        if v is None:
+            return default
+        return str(v).strip().lower() not in ('false', '0', 'no', 'off')
+
+    app.config['ALIGN_PREALIGN_ON_SAVE'] = _env_bool('ALIGN_PREALIGN_ON_SAVE', True)
+    app.config['AUDIO_LOG_DIR'] = os.environ.get('AUDIO_LOG_DIR')
+    app.config['AUDIO_LOG_NATIVE'] = _env_bool('AUDIO_LOG_NATIVE', True)
+    app.config['ALIGN_ENDPOINT'] = os.environ.get('ALIGN_ENDPOINT', 'http://silence-remover.com:8000/align')
     
     # Set secret key for session
     app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key')
