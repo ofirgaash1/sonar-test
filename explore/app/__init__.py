@@ -126,6 +126,23 @@ def create_app(data_dir: str, index_file: str = None):
                 return resp
         return None
 
+    # Ensure SQLite file handles are released between tests/requests (Windows tempdir cleanup)
+    from .services.db import DatabaseService
+
+    @app.teardown_request
+    def _close_db_on_request_teardown(exc=None):
+        try:
+            DatabaseService.close_all()
+        except Exception:
+            pass
+
+    @app.teardown_appcontext
+    def _close_db_on_app_teardown(exc=None):
+        try:
+            DatabaseService.close_all()
+        except Exception:
+            pass
+
     return app
 
 def init_index_manager(app, file_records=None, index_file=None, force_reindex=False, **db_kwargs):

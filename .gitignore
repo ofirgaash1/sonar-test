@@ -10,3 +10,4 @@ explore.sqlite-wal
 explore/app/__pycache__/
 /audio-log
 *.log
+/tests

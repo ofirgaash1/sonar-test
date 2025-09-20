@@ -11,6 +11,9 @@ import sqlite3
 class DatabaseService:
     """Database service that abstracts operations across different database providers."""
     
+    # Track all live connections (strong refs) for explicit cleanup on teardown (Windows file locks)
+    _all_conns = []
+
     def __init__(self, for_index_generation: bool = False, **kwargs):
         """
         Initialize database service.
@@ -33,12 +36,13 @@ class DatabaseService:
     def _setup_connection(self):
         """Setup SQLite database connection."""
         path = self._kwargs.get("path", "explore.sqlite")
-        self._local.conn = sqlite3.connect(path)
+        # Allow reuse across test threads and reduce lock issues
+        self._local.conn = sqlite3.connect(path, check_same_thread=False, timeout=5.0)
         
-        # Configure SQLite parameters for better performance
+        # Configure SQLite parameters (prefer DELETE journal on Windows to avoid WAL/SHM locks)
         cursor = self._local.conn.cursor()
         cursor.execute("PRAGMA cache_size = -4194304")  # 4GB cache (negative value means KB)
-        cursor.execute("PRAGMA journal_mode = WAL")
+        cursor.execute("PRAGMA journal_mode = DELETE")
         
         # Only use memory temp store if not generating an index (to allow saving)
         if not self.for_index_generation:
@@ -48,6 +52,10 @@ class DatabaseService:
         
         # Register UDF for SQLite
         self._register_udf()
+        try:
+            DatabaseService._all_conns.append(self._local.conn)
+        except Exception:
+            pass
     
     def _register_udf(self):
         """Register user-defined functions for SQLite."""
@@ -87,8 +95,55 @@ class DatabaseService:
     def close(self) -> None:
         """Close database connection."""
         if hasattr(self._local, 'conn') and self._local.conn:
+            try:
+                # Best-effort: checkpoint and switch back to DELETE to release WAL/SHM handles (Windows)
+                cur = self._local.conn.cursor()
+                try:
+                    cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
+                try:
+                    cur.execute("PRAGMA journal_mode = DELETE")
+                except Exception:
+                    pass
+                try:
+                    self._local.conn.commit()
+                except Exception:
+                    pass
+            except Exception:
+                pass
             self._local.conn.close()
             delattr(self._local, 'conn')
+
+    @classmethod
+    def close_all(cls):
+        """Close all tracked SQLite connections (best-effort)."""
+        conns = list(cls._all_conns) if isinstance(cls._all_conns, list) else []
+        for c in conns:
+            try:
+                try:
+                    cur = c.cursor()
+                    try:
+                        cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    except Exception:
+                        pass
+                    try:
+                        cur.execute("PRAGMA journal_mode = DELETE")
+                    except Exception:
+                        pass
+                    try:
+                        c.commit()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                c.close()
+            except Exception:
+                pass
+        try:
+            cls._all_conns[:] = []
+        except Exception:
+            pass
     
     def __enter__(self):
         return self

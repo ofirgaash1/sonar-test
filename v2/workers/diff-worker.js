@@ -354,6 +354,9 @@ function patch_toText_fromDiffs(diffs) {
   try { return JSON.stringify(diffs); } catch { return ''; }
 }
 
+// Share core diff algorithm with tests and non-worker usage
+import { diffStrings as coreDiffStrings, reconstructNew as coreReconstructNew, reconstructOld as coreReconstructOld } from './diff-core.js';
+
 self.onmessage = async (ev) => {
   const msg = ev?.data || {};
   const t = msg.type;
@@ -403,116 +406,18 @@ self.onmessage = async (ev) => {
         console.log(`[diff:${debugTag}] lines.pre`, preL, 'lines.post', postL, 'a.mid.lines', aLines0.length - preL - postL, 'b.mid.lines', bLines0.length - preL - postL);
       }
 
-      let diffs = granularDiff(baseText, nextText, debugTag);
-      let strategy = 'granular';
-      // If something goes wrong (unlikely), fall back to previous strategies
-      if (!Array.isArray(diffs) || diffs.length === 0) {
-        strategy = 'fallback:token/char';
-        const aTokAll = toTokens(baseText);
-        const bTokAll = toTokens(nextText);
-        const preTok = commonPrefixLen(aTokAll, bTokAll);
-        const aTokTail = aTokAll.slice(preTok);
-        const bTokTail = bTokAll.slice(preTok);
-        const postTok = commonSuffixLen(aTokTail, bTokTail);
-        const aTokMid = aTokAll.slice(preTok, aTokAll.length - postTok);
-        const bTokMid = bTokAll.slice(preTok, bTokAll.length - postTok);
-        const sumTok = aTokMid.length + bTokMid.length;
-        if (sumTok <= 20000) {
-          diffs = myersDiffSeq(aTokMid, bTokMid, (arr) => arr.join(''));
-          if (preTok) diffs.unshift([0, aTokAll.slice(0, preTok).join('')]);
-          if (postTok) diffs.push([0, aTokAll.slice(aTokAll.length - postTok).join('')]);
-        } else {
-          const aChars = toChars(baseText);
-          const bChars = toChars(nextText);
-          const pre = commonPrefixLen(aChars, bChars);
-          const aMid = aChars.slice(pre);
-          const bMid = bChars.slice(pre);
-          const post = commonSuffixLen(aMid, bMid);
-          const aC = aChars.slice(pre, aChars.length - post);
-          const bC = bChars.slice(pre, bChars.length - post);
-          const sumChars = aC.length + bC.length;
-          diffs = (sumChars <= 16000) ? myersDiffSeq(aC, bC, (arr) => arr.join('')) : simpleGreedyDiff(aC.join(''), bC.join(''));
-          if (pre) diffs.unshift([0, aChars.slice(0, pre).join('')]);
-          if (post) diffs.push([0, aChars.slice(aChars.length - post).join('')]);
-        }
-      }
-      // Validate reconstruction (with canonicalization to avoid false negatives)
-      const canon = (s) => {
-        try {
-          let t = String(s || '');
-          t = t.replace(/\r/g, '');
-          t = t.replace(/\u00A0/g, ' ');
-          t = t.replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '');
-          if (t.normalize) t = t.normalize('NFC');
-          return t;
-        } catch { return String(s || ''); }
-      };
-      const reconstructNew = (ops) => { try { return (ops || []).map(([op, s]) => (op === -1 ? '' : (s || ''))).join(''); } catch { return ''; } };
-      const reconstructOld = (ops) => { try { return (ops || []).map(([op, s]) => (op === 1 ? '' : (s || ''))).join(''); } catch { return ''; } };
-      let okNew = canon(reconstructNew(diffs)) === canon(nextText);
-      let okOld = canon(reconstructOld(diffs)) === canon(baseText);
+      // Compute diffs via shared core implementation (keeps tests + worker in sync)
+      let diffs = coreDiffStrings(baseText, nextText);
+      let strategy = 'core';
+      // Validate reconstruction using shared helpers
+      const rn = (ops) => coreReconstructNew(ops);
+      const ro = (ops) => coreReconstructOld(ops);
+      const okNew = rn(diffs) === String(nextText || '');
+      const okOld = ro(diffs) === String(baseText || '');
       if (debugTag) {
         try {
-          const rn = reconstructNew(diffs); const ro = reconstructOld(diffs);
-          console.log(`[diff:${debugTag}] recon.len new`, rn.length, 'old', ro.length);
-          console.log(`[diff:${debugTag}] canon.ok new`, okNew, 'old', okOld);
+          console.log(`[diff:${debugTag}] core.ok new`, okNew, 'old', okOld);
         } catch {}
-      }
-      if (!(okNew && okOld)) {
-        // Fallback 1a: jsdiff word-wise across entire text
-        try {
-          const jsd = await import('https://esm.sh/diff@5');
-          const parts = jsd?.diffWordsWithSpace ? jsd.diffWordsWithSpace(baseText, nextText) : null;
-          if (Array.isArray(parts) && parts.length) {
-            const mapped = normalizeDiffs(parts.map(p => [p.added ? 1 : (p.removed ? -1 : 0), String(p.value || '')]));
-            const rn = (ops) => ops.map(([op,s]) => (op === -1 ? '' : s)).join('');
-            const ro = (ops) => ops.map(([op,s]) => (op === 1 ? '' : s)).join('');
-            if (rn(mapped) === nextText && ro(mapped) === baseText) {
-              diffs = mapped; okNew = okOld = true; strategy = 'fallback:jsdiff-words';
-            }
-          }
-        } catch (e) { if (debugTag) try { console.warn(`[diff:${debugTag}] jsdiff import failed`, e); } catch {} }
-      }
-      if (!(okNew && okOld)) {
-        // Fallback 1: pure char-level trimmed diff
-        try {
-          const aChars = toChars(baseText);
-          const bChars = toChars(nextText);
-          const pre = commonPrefixLen(aChars, bChars);
-          const aMid = aChars.slice(pre);
-          const bMid = bChars.slice(pre);
-          const post = commonSuffixLen(aMid, bMid);
-          const aC = aChars.slice(pre, aChars.length - post);
-          const bC = bChars.slice(pre, bChars.length - post);
-          let diffs2 = myersDiffSeq(aC, bC, (arr) => arr.join(''));
-          if (pre) diffs2.unshift([0, aChars.slice(0, pre).join('')]);
-          if (post) diffs2.push([0, aChars.slice(aChars.length - post).join('')]);
-          if (canon(reconstructNew(diffs2)) === canon(nextText) && canon(reconstructOld(diffs2)) === canon(baseText)) {
-            diffs = diffs2;
-            okNew = okOld = true;
-            strategy = 'fallback:char-trim';
-          }
-        } catch {}
-      }
-      if (!(okNew && okOld)) {
-        // Fallback 1b: try diff-match-patch (semantic cleanup)
-        try {
-          const dmpDiffs = await dmpDiffStrings(baseText, nextText, debugTag);
-          if (Array.isArray(dmpDiffs) && dmpDiffs.length) {
-            const rn = (ops) => ops.map(([op,s]) => (op === -1 ? '' : s)).join('');
-            const ro = (ops) => ops.map(([op,s]) => (op === 1 ? '' : s)).join('');
-            if (rn(dmpDiffs) === nextText && ro(dmpDiffs) === baseText) {
-              diffs = dmpDiffs; okNew = okOld = true; strategy = 'fallback:dmp';
-            }
-          }
-        } catch {}
-      }
-      if (!(okNew && okOld)) {
-        // Fallback 2: minimal but always-correct patch: delete all A, insert all B
-        strategy = 'fallback:delete-insert-all';
-        diffs = [];
-        if (baseText) diffs.push([-1, baseText]);
-        if (nextText) diffs.push([1, nextText]);
       }
       if (debugTag) {
         const statsDbg = computeStats(diffs);

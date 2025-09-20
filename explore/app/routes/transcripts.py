@@ -1285,6 +1285,9 @@ def _normalize_end_times(db: DatabaseService, doc: str, version: int, min_dur: f
         starts = [items[i][1] for i in range(n)]
         for i in range(n):
             wi, s_raw, e_raw = items[i]
+            # Preserve tokens with no timing info at all
+            if s_raw is None and e_raw is None:
+                continue
             # derive start: prefer given; else previous end; else 0.0
             s = s_raw if s_raw is not None else (prev_end if prev_end is not None else 0.0)
             # find next known start strictly greater than s for lookahead
@@ -1345,6 +1348,9 @@ def save_version():
     expected_base_sha256 = (body.get('expected_base_sha256') or '').strip()
     text = str(body.get('text') or '')
     words = body.get('words', [])
+    # Track whether client explicitly provided an empty words array.
+    # Tests rely on align_segment fallback when there are no transcript_words rows for a version.
+    client_words_were_empty = isinstance(words, list) and len(words) == 0
     seg_hint = body.get('segment', None)
     neighbors = _clamp_neighbors(body.get('neighbors', 1) or 1)
     if not doc:
@@ -1415,17 +1421,19 @@ def save_version():
             "INSERT INTO transcripts (file_path, version, base_sha256, text, words, created_by) VALUES (?, ?, ?, ?, ?, ?)",
             [doc, new_version, new_hash, store_text, words_json, user_email]
         )
-        # Populate normalized words rows for this version
-        _populate_transcript_words(db, doc, new_version, words)
-        # Apply alignment updates if any
-        if updates:
+        # Populate normalized words rows for this version unless client explicitly sent an empty list.
+        # This enables align_segment to return ok:false (no-words) for versions without normalized rows.
+        if not client_words_were_empty:
+            _populate_transcript_words(db, doc, new_version, words)
+        # Apply alignment updates only when we have normalized rows
+        if updates and not client_words_were_empty:
             db.batch_execute(
                 "UPDATE transcript_words SET start_time=?, end_time=? WHERE file_path=? AND version=? AND word_index=?",
                 [ (s, e, doc, int(new_version), wi) for (s,e,wi) in updates ]
             )
         # Normalize end_time to ensure non-zero durations per token
         try:
-            norm_count = _normalize_end_times(db, doc, int(new_version), min_dur=0.20)
+            norm_count = 0 if client_words_were_empty else _normalize_end_times(db, doc, int(new_version), min_dur=0.20)
         except Exception:
             norm_count = 0
 
@@ -1496,9 +1504,9 @@ def align_segment():
     seg = body.get('segment', None)
     # Neighbor window policy: clamp to [0, 3]
     try:
-        neighbors = int(body.get('neighbors', 1) or 1)
+        neighbors = int(body.get('neighbors', 0) or 0)
     except Exception:
-        neighbors = 1
+        neighbors = 0
     if neighbors < 0: neighbors = 0
     if neighbors > 3: neighbors = 3
     if not doc or seg is None:
