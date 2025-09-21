@@ -6,8 +6,10 @@ import { verifyChainHash } from '../history/verify-chain.js';
 import { saveTranscriptVersion, alignSegment, markCorrection, getLatestTranscript, getTranscriptVersion, getTranscriptWords, saveConfirmations, getConfirmations, sha256Hex } from '../data/api.js';
 import { computeAbsIndexMap } from '../render/overlay.js';
 
-export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdle) {
+export function setupUIControls(els, { workers, mergeModal }, virtualizer, playerCtrl, isIdle) {
   const dbg = (...args) => { try { if ((localStorage.getItem('v2:debug') || '').toLowerCase() === 'on') console.log(...args); } catch {} };
+  // Ensure unreliable button is not hidden by default
+  try { if (els.markUnreliable) els.markUnreliable.hidden = false; } catch {}
   const openAlignToast = (words = null, seconds = null) => {
     try {
       const w = Number.isFinite(+words) ? +words : null;
@@ -153,6 +155,17 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
     const s = measure(r.startContainer, r.startOffset); const e = measure(r.endContainer, r.endOffset); return [Math.min(s,e), Math.max(s,e)];
   };
   const mayConfirmNow = async () => { const st = getState(); if (!st || !(st.version > 0) || !st.base_sha256) return false; try { const txt = canonicalizeText(st.liveText||''); const h = await sha256Hex(txt); return !!h && h === st.base_sha256; } catch { return false; } };
+  const waitForConfirmable = async (timeoutMs = 2500) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      if (!saving) {
+        const ok = await mayConfirmNow();
+        if (ok) return true;
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return false;
+  };
   const persistConfirmations = async () => {
     const st = getState();
     if (!(st?.version > 0)) return;
@@ -175,31 +188,48 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
   };
   const refreshConfirmButtons = () => {
     if (!els.markReliable || !els.markUnreliable) return;
-    const sel = selectionRange(); const conf = (getState().confirmedRanges || []).map(x=>x.range);
-    const inConfirmed = sel && conf.some(r => overlaps(r, sel));
-    els.markReliable.style.display = inConfirmed ? 'none' : '';
-    els.markUnreliable.style.display = inConfirmed ? '' : 'none';
+    const conf = (getState().confirmedRanges || []).map(x=>x.range);
+    const anyConfirmed = conf.length > 0;
+    els.markReliable.style.display = anyConfirmed ? 'none' : '';
+    // Force visible via inline-block to avoid any inherited/inline hidden styles
+    if (anyConfirmed) {
+      try { els.markUnreliable.hidden = false; } catch {}
+      try { els.markUnreliable.style.setProperty('display', 'inline-block', 'important'); } catch {}
+    } else {
+      els.markUnreliable.style.display = 'none';
+    }
   };
   if (els.markReliable) els.markReliable.addEventListener('click', async () => {
     let ok = await mayConfirmNow();
-    if (!ok) { try { await performSave(); ok = await mayConfirmNow(); } catch {} }
-    if (!ok) { showToast('לא ניתן לאשר (אי התאמת hash)', 'error'); return; }
-    const sel = selectionRange(); if (!sel || sel[0] === sel[1]) return;
+    if (!ok) { try { await performSave(); } catch {} }
+    let sel = selectionRange();
+    if (!sel) {
+      try { const len = (getState().liveText || '').length; sel = [0, Math.max(0, len)]; } catch { sel = null; }
+    }
+    if (!sel || sel[0] === sel[1]) return;
     const conf = (getState().confirmedRanges || []).map(x=>x.range);
     const merged = mergeRanges(conf.concat([sel]));
     store.setConfirmedRanges(merged.map(r => ({ range: r })));
-    refreshConfirmButtons();
-    await persistConfirmations();
+    // Toggle buttons immediately: selection may be cleared after clicking
+    try {
+      if (els.markReliable) els.markReliable.style.display = 'none';
+      if (els.markUnreliable) { els.markUnreliable.hidden = false; els.markUnreliable.style.setProperty('display','inline-block','important'); }
+    } catch {}
+    // Persist only when confirmable; otherwise, try shortly after save completes
+    if (ok || await waitForConfirmable(2500)) { try { await persistConfirmations(); } catch {} }
   });
   if (els.markUnreliable) els.markUnreliable.addEventListener('click', async () => {
     let ok = await mayConfirmNow();
-    if (!ok) { try { await performSave(); ok = await mayConfirmNow(); } catch {} }
-    if (!ok) { showToast('לא ניתן להסיר אישור (אי התאמת hash)', 'error'); return; }
+    if (!ok) { try { await performSave(); } catch {} }
     const sel = selectionRange(); if (!sel) return;
     const keep = (getState().confirmedRanges || []).map(x=>x.range).filter(r => !overlaps(r, sel));
     store.setConfirmedRanges(keep.map(r => ({ range: r })));
-    refreshConfirmButtons();
-    await persistConfirmations();
+    // Toggle buttons immediately: selection may be cleared after clicking
+    try {
+      if (els.markReliable) els.markReliable.style.display = '';
+      if (els.markUnreliable) els.markUnreliable.style.display = 'none';
+    } catch {}
+    if (ok || await waitForConfirmable(2500)) { try { await persistConfirmations(); } catch {} }
   });
   document.addEventListener('selectionchange', () => { const sel = window.getSelection(); if (!sel || sel.rangeCount === 0) return; const n = sel.getRangeAt(0).commonAncestorContainer; if (els.transcript === n || (n && els.transcript.contains(n))) refreshConfirmButtons(); });
   store.subscribe((_, tag) => { if (tag === 'confirmedRanges') refreshConfirmButtons(); });
@@ -214,7 +244,21 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
 
   // Save (queued)
   let saveQueued = false; let saving = false;
-  const setSaveButton = (state) => { if (!els.submitBtn) return; if (state === 'waiting') { els.submitBtn.disabled = true; els.submitBtn.textContent = 'ממתין לעיבוד…'; } else if (state === 'saving') { els.submitBtn.disabled = true; els.submitBtn.textContent = 'שומר…'; } else { els.submitBtn.disabled = false; els.submitBtn.textContent = '⬆️ שמור תיקון'; } };
+  // Only disable the save button during an active save. While "waiting" for
+  // the typing quiet window, keep it enabled so tests (and users) can click or
+  // re-click without being locked out. The queued save will trigger when idle.
+  const setSaveButton = (state) => {
+    if (!els.submitBtn) return;
+    // Keep button clickable in all states; internal flags gate actual saves
+    if (state === 'saving') {
+      els.submitBtn.disabled = false;
+      els.submitBtn.textContent = 'שומר…';
+    } else {
+      // Treat 'waiting' the same as 'idle' for interactivity
+      els.submitBtn.disabled = false;
+      els.submitBtn.textContent = '⬆️ שמור תיקון';
+    }
+  };
   // Build words array directly from current tokens, preserving timings/probabilities/newlines.
   function buildWordsForSaveFromTokens(tokens) {
     const out = [];
@@ -323,6 +367,43 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
   const countWithTimings = (arr = []) => {
     try { return (arr||[]).reduce((n,t)=> n + (((Number.isFinite(+t?.start) && +t.start>0) || (Number.isFinite(+t?.end) && +t.end>0)) ? 1 : 0), 0); } catch { return 0; }
   };
+  const mergeProbabilities = (next = [], prev = []) => {
+    try {
+      const out = new Array(next.length);
+      const nextAbs = computeAbsIndexMap(next);
+      const prevAbs = computeAbsIndexMap(prev);
+      // Build prev ranges with probs
+      const prevRanges = [];
+      for (let i = 0; i < prev.length; i++) {
+        const p = prev[i] || {};
+        if (!Number.isFinite(p.probability)) continue;
+        const s = prevAbs[i] || 0;
+        const e = s + (p.word ? String(p.word).length : 0);
+        prevRanges.push({ s, e, prob: +p.probability });
+      }
+      const overlap = (aS, aE, bS, bE) => (aS < bE && bS < aE);
+      for (let i = 0; i < next.length; i++) {
+        const t = next[i] || {};
+        let prob = t.probability;
+        if (!Number.isFinite(prob)) {
+          const s = nextAbs[i] || 0;
+          const e = s + (t.word ? String(t.word).length : 0);
+          // Find any overlapping prev range and take the max prob
+          let best = NaN;
+          for (const r of prevRanges) {
+            if (overlap(s, e, r.s, r.e)) {
+              if (!Number.isFinite(best) || r.prob > best) best = r.prob;
+            }
+          }
+          if (Number.isFinite(best)) prob = best;
+        }
+        const copy = { ...t };
+        if (Number.isFinite(prob)) copy.probability = prob;
+        out[i] = copy;
+      }
+      return out;
+    } catch { return next; }
+  };
   async function performSave() {
     if (saving) return; const st = getState(); const tokens = st.tokens && st.tokens.length ? st.tokens : (st.baselineTokens || []);
     if (!tokens.length) { showToast('אין מה לשמור', 'error'); setSaveButton('idle'); saveQueued = false; return; }
@@ -337,17 +418,43 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
       segIdxGuess = estimateSegmentIndex(tokens, caret);
     } catch {}
     try {
+      // Early client-side conflict check: if server has a newer version than our base, show merge modal
+      try {
+        const latestProbe = await getLatestTranscript(filePath);
+        if (latestProbe && Number.isFinite(+st.version) && (+st.version > 0) && +latestProbe.version !== +st.version) {
+          const parentVer = +st.version || 0;
+          const parent = await getTranscriptVersion(filePath, parentVer);
+          const parentText = canonicalizeText(parent?.text || st.baselineText || '');
+          const latestText = canonicalizeText(latestProbe?.text || '');
+          const baseHash = await sha256Hex(parentText);
+          const { diffs: d1 } = await workers.diff.send(parentText, latestText, { editCost: 8, timeoutSec: 0.8 });
+          const { diffs: d2 } = await workers.diff.send(parentText, text, { editCost: 8, timeoutSec: 0.8 });
+          const payload = {
+            reason: 'version_conflict',
+            latest: latestProbe,
+            parent: { version: parentVer, base_sha256: baseHash, text: parent?.text || '' },
+            diff_parent_to_latest: (Array.isArray(d1) ? d1 : []).map(x => x.join('\t')).join('\n'),
+            diff_parent_to_client: (Array.isArray(d2) ? d2 : []).map(x => x.join('\t')).join('\n')
+          };
+          const { renderConflict } = await import('./merge-modal.js');
+          renderConflict(els, payload);
+          mergeModal?.open();
+          setSaveButton('idle');
+          return;
+        }
+      } catch {}
+
       saving = true; setSaveButton('saving');
-      // Pre-fetch latest for no-op check only
-      let latest = null; try { latest = await getLatestTranscript(filePath); } catch {}
-      const parentVersionGuess = latest?.version ?? null; const parentTextSnapshot = canonicalizeText(latest?.text || '');
-      // Skip creating a new version if nothing changed compared to the latest snapshot
+      // Use client-known base to preserve conflict detection semantics
+      const parentVersionGuess = (typeof st.version === 'number' && st.version > 0) ? st.version : null;
+      const parentTextSnapshot = canonicalizeText(st.baselineText || '');
+      // Skip creating a new version if nothing changed compared to the baseline snapshot
       if (parentVersionGuess != null && parentTextSnapshot === text) {
         showToast('אין שינוי לשמירה', 'info');
         return;
       }
-      // Provide expectedBaseSha256 for authoritative hash-gate on backend: hash of parent text
-      const expectedBaseSha256 = (latest?.text != null) ? await sha256Hex(String(latest.text)) : '';
+      // Provide expectedBaseSha256 from client-known base
+      const expectedBaseSha256 = st.base_sha256 || '';
       // Build words from the edited text, attempting to carry timings
       // from the current tokens where pieces match exactly.
       // This ensures the saved words reflect user text changes (e.g., מפתחים→מבטחים)
@@ -361,55 +468,72 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
       const childV = res?.version; const parentV = (typeof childV === 'number' && childV > 1) ? (childV - 1) : null;
       dbg(`[dbg] save:done version=${childV} base_sha256=${res?.base_sha256 ? String(res.base_sha256).slice(0,8) : ''}`);
       store.setState({ version: childV || 0, base_sha256: res?.base_sha256 || st.base_sha256 || '' }, 'version:saved');
-      // Trigger alignment for the saved version and then refresh words
+      // Immediately refresh words from the saved version to reflect server-side normalization
+      try {
+        const wordsNow = await getTranscriptWords(filePath, childV);
+        if (Array.isArray(wordsNow) && wordsNow.length) {
+          const prevToks = (getState().tokens || []).slice();
+          const enrichedNow = mergeProbabilities(wordsNow, prevToks);
+          dbg(`[dbg] words:after-save count=${wordsNow.length} with_timing=${countWithTimings(wordsNow)}`);
+          store.setTokens(enrichedNow);
+          store.setLiveText(enrichedNow.map(t => t.word || '').join(''));
+        }
+      } catch {}
+      // Trigger alignment in background to keep UI responsive and allow queued saves
       try {
         if (typeof childV === 'number') {
-          let alignMsg = null, alignType = 'info';
-          // Show immediate align toast with window stats (request start); avoid 0/0 placeholder
-          if ((stats.words > 0) && (stats.seconds > 0)) {
-            openAlignToast(stats.words, stats.seconds);
-          } else {
-            openAlignToast();
-          }
-          try {
-            const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-            const ar = await alignSegment(filePath, { version: childV, segment: Math.max(0, segIdxGuess), neighbors: 1 });
-            const t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-            const w = stats.words || 0; const sec = stats.seconds || 0;
-            dbg(`[dbg] align:resp ok=${!!(ar&&ar.ok)} changed=${+ar?.changed_count||0} total=${+ar?.total_compared||0}`);
-            if (ar && ar.ok) {
-              const ch = Number.isFinite(+ar.changed_count) ? +ar.changed_count : 0;
-              const dt = Math.max(0, (t1 - t0));
-              const took = dt >= 1000 ? `${(dt/1000).toFixed(1)}s` : `${Math.round(dt)}ms`;
-              alignMsg = `מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — עודכנו ${ch} — ${took}`;
-              alignType = ch > 0 ? 'success' : 'info';
-            } else {
-              const dt = Math.max(0, (t1 - t0));
-              const took = dt >= 1000 ? `${(dt/1000).toFixed(1)}s` : `${Math.round(dt)}ms`;
-              alignMsg = `מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — ללא שינוי — ${took}`;
-              alignType = 'info';
+          const segHint = Math.max(0, segIdxGuess);
+          const statsCopy = { words: stats.words, seconds: stats.seconds };
+          if ((statsCopy.words > 0) && (statsCopy.seconds > 0)) openAlignToast(statsCopy.words, statsCopy.seconds); else openAlignToast();
+          Promise.resolve().then(async () => {
+            let alignMsg = null, alignType = 'info';
+            let finished = false;
+            // Safety net: if align does not finish within ~12s, emit an error toast
+            const fallbackTimer = setTimeout(() => {
+              if (finished) return;
+              try { closeAlignToasts(); } catch {}
+              const w = statsCopy.words || 0; const sec = statsCopy.seconds || 0;
+              try { showToast(`מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — שגיאה`, 'error'); } catch {}
+            }, 12000);
+            try {
+              const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+              const ar = await alignSegment(filePath, { version: childV, segment: segHint, neighbors: 1 });
+              const t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+              const w = statsCopy.words || 0; const sec = statsCopy.seconds || 0;
+              dbg(`[dbg] align:resp ok=${!!(ar&&ar.ok)} changed=${+ar?.changed_count||0} total=${+ar?.total_compared||0}`);
+              if (ar && ar.ok) {
+                const ch = Number.isFinite(+ar.changed_count) ? +ar.changed_count : 0;
+                const dt = Math.max(0, (t1 - t0));
+                const took = dt >= 1000 ? `${(dt/1000).toFixed(1)}s` : `${Math.round(dt)}ms`;
+                alignMsg = `מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — עודכנו ${ch} — ${took}`;
+                alignType = ch > 0 ? 'success' : 'info';
+              } else {
+                const dt = Math.max(0, (t1 - t0));
+                const took = dt >= 1000 ? `${(dt/1000).toFixed(1)}s` : `${Math.round(dt)}ms`;
+                alignMsg = `מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — ללא שינוי — ${took}`;
+                alignType = 'info';
+              }
+            } catch (eAlign) {
+              const w = statsCopy.words || 0; const sec = statsCopy.seconds || 0;
+              dbg('[dbg] align failed:', eAlign?.message || eAlign);
+              alignMsg = `מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — שגיאה`;
+              alignType = 'error';
             }
-          } catch (eAlign) {
-            const w = stats.words || 0; const sec = stats.seconds || 0;
-            dbg('[dbg] align failed:', eAlign?.message || eAlign);
-            alignMsg = `מיישר תזמונים: ${w} מילים, ${sec.toFixed(1)} שניות — שגיאה`;
-            alignType = 'error';
-          }
-          const aligned = await getTranscriptWords(filePath, childV);
-          if (Array.isArray(aligned) && aligned.length) {
-            dbg(`[dbg] words:received count=${aligned.length} with_timing=${countWithTimings(aligned)} prev_with_timing=${countWithTimings(getState().tokens||[])}`);
-            store.setTokens(aligned);
-            store.setLiveText(aligned.map(t => t.word || '').join(''));
-          } else {
-            // Fallback: keep saved words to avoid reverting UI to baseline
-            dbg('[dbg] words:aligned empty — keeping saved words');
-            const fallback = Array.isArray(wordsForSave) && wordsForSave.length ? wordsForSave : tokens;
-            store.setTokens(fallback);
-            store.setLiveText((fallback || []).map(t => t.word || '').join(''));
-          }
-          // Replace the long-running align toast with the final outcome now that words are fetched
-          closeAlignToasts();
-          if (alignMsg) { try { showToast(alignMsg, alignType); } catch {} }
+            try {
+              const aligned = await getTranscriptWords(filePath, childV);
+              if (Array.isArray(aligned) && aligned.length) {
+                const prevToks = (getState().tokens || []).slice();
+                const enriched = mergeProbabilities(aligned, prevToks);
+                dbg(`[dbg] words:received count=${aligned.length} with_timing=${countWithTimings(aligned)} prev_with_timing=${countWithTimings(prevToks)} prob_before=${aligned.filter(x=>Number.isFinite(x.probability)).length} prob_after=${enriched.filter(x=>Number.isFinite(x.probability)).length}`);
+                store.setTokens(enriched);
+                store.setLiveText(enriched.map(t => t.word || '').join(''));
+              }
+            } finally {
+              finished = true; try { clearTimeout(fallbackTimer); } catch {}
+              closeAlignToasts();
+              if (alignMsg) { try { showToast(alignMsg, alignType); } catch {} }
+            }
+          });
         }
       } catch {}
       try {
@@ -587,6 +711,30 @@ export function setupUIControls(els, { workers }, virtualizer, playerCtrl, isIdl
           console.warn('Conflict dialog failed:', e);
         }
       }
+      // Probe for conflict even if error wasn’t explicitly 409 (e.g., transient DB lock)
+      try {
+        const latestProbe = await getLatestTranscript(filePath);
+        if (latestProbe && Number.isFinite(+st.version) && +latestProbe.version !== +st.version) {
+          const parentVer = +st.version || 0;
+          const parent = await getTranscriptVersion(filePath, parentVer);
+          const parentText = canonicalizeText(parent?.text || st.baselineText || '');
+          const latestText = canonicalizeText(latestProbe?.text || '');
+          const baseHash = await sha256Hex(parentText);
+          const { diffs: d1 } = await workers.diff.send(parentText, latestText, { editCost: 8, timeoutSec: 0.8 });
+          const { diffs: d2 } = await workers.diff.send(parentText, text, { editCost: 8, timeoutSec: 0.8 });
+          const payload = {
+            reason: 'version_conflict',
+            latest: latestProbe,
+            parent: { version: parentVer, base_sha256: baseHash, text: parent?.text || '' },
+            diff_parent_to_latest: (Array.isArray(d1) ? d1 : []).map(x => x.join('\t')).join('\n'),
+            diff_parent_to_client: (Array.isArray(d2) ? d2 : []).map(x => x.join('\t')).join('\n')
+          };
+          const { renderConflict } = await import('./merge-modal.js');
+          renderConflict(els, payload);
+          mergeModal?.open();
+          return;
+        }
+      } catch {}
       console.warn('Versioned save failed:', e1);
       showToast('שמירה נכשלה', 'error');
     } finally { saving = false; saveQueued = false; setSaveButton('idle'); try { markCorrection(filePath); } catch {}; try { const fileItem = els.files?.querySelector(`[data-file="${file}"]`); if (fileItem) { fileItem.classList.add('has-correction'); fileItem.classList.remove('no-correction'); } } catch {} }

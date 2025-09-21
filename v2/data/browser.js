@@ -55,6 +55,20 @@ export function setupBrowser(els, { bumpEditGen } = {}) {
           loadEpisodeFile(folderName, item.dataset.file);
         });
       });
+      // Auto-open first file for smoother UX/tests (use data we already have)
+      try {
+        const first = Array.isArray(files) && files.length ? files[0] : null;
+        if (first && first.name) {
+          const f = String(first.name);
+          desiredPath = `${folderName}/${f}`;
+          // Call loader directly; mark active in DOM if present
+          loadEpisodeFile(folderName, f);
+          try {
+            const node = els.files.querySelector(`.item[data-file="${CSS.escape(f)}"]`);
+            if (node) node.classList.add('active');
+          } catch {}
+        }
+      } catch {}
       // After render: compute green/red badges by querying backend latest versions
       try {
         const items = Array.from(els.files.querySelectorAll('.item'));

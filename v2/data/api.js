@@ -399,17 +399,32 @@ export async function saveTranscriptVersion(filePath, { parentVersion = null, te
       payload.neighbors = n;
     }
   } catch {}
-  const r = await fetchBackend(`${base}/transcripts/save`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-  });
-  if (!r.ok) {
+  // Retry wrapper to mitigate transient SQLite "database is locked" errors under concurrent access
+  const maxAttempts = 6; // ~0.8–1.2s total with backoff
+  let attempt = 0;
+  let lastErrText = '';
+  while (attempt < maxAttempts) {
+    attempt++;
+    const r = await fetchBackend(`${base}/transcripts/save`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    if (r.ok) {
+      return await r.json();
+    }
     if (r.status === 409) {
       let payload = null; try { payload = await r.json(); } catch {}
       const err = new Error('Conflict'); err.code = 409; err.payload = payload; throw err;
     }
-    throw new Error(await r.text().catch(()=> 'save failed'));
+    // Capture body for diagnostics and retry on lock
+    try { lastErrText = await r.text(); } catch { lastErrText = 'save failed'; }
+    const retriable = r.status >= 500 || /database is locked/i.test(lastErrText || '');
+    if (!retriable || attempt >= maxAttempts) {
+      throw new Error(lastErrText || 'save failed');
+    }
+    // Simple backoff: 50ms, 100ms, 150ms, ...
+    await new Promise(res => setTimeout(res, 50 * attempt));
   }
-  return await r.json();
+  throw new Error(lastErrText || 'save failed');
 }
 
 /** Request alignment for a segment neighborhood of a given version */

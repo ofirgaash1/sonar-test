@@ -129,19 +129,9 @@ def create_app(data_dir: str, index_file: str = None):
     # Ensure SQLite file handles are released between tests/requests (Windows tempdir cleanup)
     from .services.db import DatabaseService
 
-    @app.teardown_request
-    def _close_db_on_request_teardown(exc=None):
-        try:
-            DatabaseService.close_all()
-        except Exception:
-            pass
-
-    @app.teardown_appcontext
-    def _close_db_on_app_teardown(exc=None):
-        try:
-            DatabaseService.close_all()
-        except Exception:
-            pass
+    # Avoid closing all DB connections on each request in threaded dev server,
+    # as it may race and close connections used by concurrent handlers.
+    # Cleanup is handled on process exit or by tests explicitly when needed.
 
     return app
 

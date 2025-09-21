@@ -36,13 +36,33 @@ class DatabaseService:
     def _setup_connection(self):
         """Setup SQLite database connection."""
         path = self._kwargs.get("path", "explore.sqlite")
-        # Allow reuse across test threads and reduce lock issues
-        self._local.conn = sqlite3.connect(path, check_same_thread=False, timeout=5.0)
+        # Allow reuse across threads and increase busy timeout to reduce lock errors
+        self._local.conn = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
         
-        # Configure SQLite parameters (prefer DELETE journal on Windows to avoid WAL/SHM locks)
+        # Configure SQLite parameters. Default to WAL for better concurrency.
+        # Can be overridden via env SQLITE_JOURNAL=DELETE for scenarios needing easy file cleanup.
         cursor = self._local.conn.cursor()
-        cursor.execute("PRAGMA cache_size = -4194304")  # 4GB cache (negative value means KB)
-        cursor.execute("PRAGMA journal_mode = DELETE")
+        try:
+            cursor.execute("PRAGMA cache_size = -4194304")  # 4GB cache (negative value means KB)
+        except Exception:
+            pass
+        try:
+            cursor.execute("PRAGMA busy_timeout = 5000")
+        except Exception:
+            pass
+        try:
+            import os as _os
+            jm = (_os.environ.get('SQLITE_JOURNAL') or 'WAL').upper()
+            if jm not in ('WAL','DELETE','TRUNCATE','PERSIST','MEMORY','OFF'):
+                jm = 'WAL'
+            cursor.execute(f"PRAGMA journal_mode = {jm}")
+            if jm == 'WAL':
+                # Tweak for WAL performance
+                try: cursor.execute("PRAGMA synchronous = NORMAL")
+                except Exception: pass
+        except Exception:
+            # If locked when setting journal mode, ignore and continue; connection still usable
+            pass
         
         # Only use memory temp store if not generating an index (to allow saving)
         if not self.for_index_generation:

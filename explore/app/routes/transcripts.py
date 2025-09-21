@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import difflib
 import os
+from pathlib import Path
 import logging
 import time
 import uuid
@@ -15,6 +16,7 @@ import subprocess
 import requests
 
 from ..services.db import DatabaseService
+from .browser import _read_transcript_json  # reuse transcript JSON loader
 
 # --- Lightweight, idempotent schema migrations ---
 _TARGET_SCHEMA_VERSION = 3
@@ -359,7 +361,8 @@ def _ffmpeg_extract_wav_clip(audio_path: str, clip_start: float, clip_end: float
 def _align_call(wav_bytes: bytes, transcript: str) -> dict:
     files = { 'audio': ('clip.wav', wav_bytes, 'audio/wav') }
     data = { 'transcript': transcript }
-    r = requests.post(current_app.config.get('ALIGN_ENDPOINT', 'http://silence-remover.com:8000/align'), files=files, data=data, timeout=60)
+    # Always call the remote silence-remover endpoint (no local align mode)
+    r = requests.post('http://silence-remover.com:8000/align', files=files, data=data, timeout=60)
     if not r.ok:
         raise RuntimeError(f'align-endpoint {r.status_code}: {r.text[:200]}')
     res = r.json() or {}
@@ -935,23 +938,97 @@ def _carry_over_timings(db: DatabaseService, doc: str, latest: Optional[dict], w
     original words and its JSON serialization.
     """
     try:
-        if latest and isinstance(words, list) and words:
-            cur = db.execute(
-                """
-                SELECT word_index, word, start_time, end_time, probability
-                FROM transcript_words
-                WHERE file_path=? AND version=?
-                ORDER BY word_index ASC
-                """,
-                [doc, int(latest['version'])]
-            )
-            prev_rows = cur.fetchall() or []
+        if isinstance(words, list) and words:
             prev_seq = []
-            for wi, w, st, en, pr in prev_rows:
+
+            # 1) Prefer previous normalized words from DB (latest version)
+            if latest:
+                cur = db.execute(
+                    """
+                    SELECT word_index, word, start_time, end_time, probability
+                    FROM transcript_words
+                    WHERE file_path=? AND version=?
+                    ORDER BY word_index ASC
+                    """,
+                    [doc, int(latest['version'])]
+                )
+                prev_rows = cur.fetchall() or []
+                for wi, w, st, en, pr in prev_rows:
+                    try:
+                        prev_seq.append({ 'word': str(w or ''), 'start': st, 'end': en, 'prob': pr })
+                    except Exception:
+                        prev_seq.append({ 'word': str(w or ''), 'start': None, 'end': None, 'prob': None })
+
+            # 2) Fallback for first save (no previous DB rows): seed from baseline JSON
+            if not prev_seq:
                 try:
-                    prev_seq.append({ 'word': str(w or ''), 'start': st, 'end': en, 'prob': pr })
+                    # Resolve transcripts dir and parse folder/file from doc
+                    transcripts_dir = current_app.config.get('TRANSCRIPTS_DIR')
+                    if transcripts_dir:
+                        # doc is logical path "folder/file.ext"
+                        try:
+                            folder, file_name = doc.split('/', 1)
+                        except ValueError:
+                            folder, file_name = '', doc
+                        tr = _read_transcript_json(Path(transcripts_dir), folder, file_name)
+                        if isinstance(tr, dict):
+                            # Prefer segments.words if present; otherwise accept top-level words
+                            segs = tr.get('segments') if isinstance(tr.get('segments'), list) else None
+                            if segs:
+                                last_end = 0.0
+                                for si, s in enumerate(segs):
+                                    words_list = (s or {}).get('words')
+                                    if isinstance(words_list, list) and words_list:
+                                        for w in words_list:
+                                            try:
+                                                t = str((w or {}).get('word') or '')
+                                            except Exception:
+                                                t = ''
+                                            try:
+                                                st = float((w or {}).get('start'))
+                                            except Exception:
+                                                st = None
+                                            try:
+                                                en = float((w or {}).get('end'))
+                                            except Exception:
+                                                en = None
+                                            try:
+                                                pr = (float((w or {}).get('probability')) if ((w or {}).get('probability') is not None and (w or {}).get('probability') != '') else None)
+                                            except Exception:
+                                                pr = None
+                                            prev_seq.append({ 'word': t, 'start': st, 'end': en, 'prob': pr })
+                                            try:
+                                                if en is not None:
+                                                    last_end = float(en)
+                                            except Exception:
+                                                pass
+                                        # newline separator between segments
+                                        prev_seq.append({ 'word': '\n', 'start': last_end, 'end': last_end, 'prob': None })
+                                # drop trailing newline to avoid extra token vs. client words
+                                if prev_seq and prev_seq[-1].get('word') == '\n':
+                                    prev_seq.pop()
+                            elif isinstance(tr.get('words'), list):
+                                for w in tr.get('words'):
+                                    try:
+                                        t = str((w or {}).get('word') or '')
+                                    except Exception:
+                                        t = ''
+                                    try:
+                                        st = float((w or {}).get('start'))
+                                    except Exception:
+                                        st = None
+                                    try:
+                                        en = float((w or {}).get('end'))
+                                    except Exception:
+                                        en = None
+                                    try:
+                                        pr = (float((w or {}).get('probability')) if ((w or {}).get('probability') is not None and (w or {}).get('probability') != '') else None)
+                                    except Exception:
+                                        pr = None
+                                    prev_seq.append({ 'word': t, 'start': st, 'end': en, 'prob': pr })
                 except Exception:
-                    prev_seq.append({ 'word': str(w or ''), 'start': None, 'end': None, 'prob': None })
+                    # ignore baseline fallback errors
+                    pass
 
             def _enrich_with_prev_seq(prev_seq_local, words_local):
                 LOOKAHEAD = 64
@@ -1005,7 +1082,8 @@ def _carry_over_timings(db: DatabaseService, doc: str, latest: Optional[dict], w
                     enriched_local.append({ 'word': t, **({ 'start': s_val } if s_val is not None else {}), **({ 'end': e_val } if e_val is not None else {}), **({ 'probability': p_val } if p_val is not None else {}) })
                 return enriched_local
 
-            words = _enrich_with_prev_seq(prev_seq, words)
+            if prev_seq:
+                words = _enrich_with_prev_seq(prev_seq, words)
     except Exception:
         # On failure, fall through with the original words
         pass
@@ -1016,6 +1094,51 @@ def _carry_over_timings(db: DatabaseService, doc: str, latest: Optional[dict], w
         # Best-effort serialization
         words_json = orjson.dumps(words or []).decode('utf-8')
     return words, words_json
+
+
+def _segment_texts_from_words(words: list) -> list[str]:
+    """Split words into segment texts (excluding '\n' tokens). Collapses whitespace for robust comparison."""
+    segs: list[str] = []
+    buf: list[str] = []
+    for w in (words or []):
+        try:
+            t = str((w or {}).get('word') or '')
+        except Exception:
+            t = ''
+        if t == '\n':
+            # flush
+            s = ' '.join(' '.join(buf).replace('\r', '').replace('\u00A0', ' ').split())
+            segs.append(s)
+            buf = []
+            continue
+        buf.append(t)
+    # flush tail
+    if buf:
+        s = ' '.join(' '.join(buf).replace('\r', '').replace('\u00A0', ' ').split())
+        segs.append(s)
+    return segs
+
+
+def _detect_changed_segments(prev_words: list, new_words: list) -> set[int]:
+    """Return indices of segments whose composed text changed between prev and new."""
+    changed: set[int] = set()
+    try:
+        prev_segs = _segment_texts_from_words(prev_words or [])
+        new_segs = _segment_texts_from_words(new_words or [])
+        m = min(len(prev_segs), len(new_segs))
+        for i in range(m):
+            if prev_segs[i] != new_segs[i]:
+                changed.add(i)
+        # Any added segments are considered changed
+        for i in range(m, len(new_segs)):
+            changed.add(i)
+        # If segments were removed, mark the last overlapping segment as changed to trigger local align
+        if len(new_segs) < len(prev_segs) and m > 0:
+            changed.add(m - 1)
+    except Exception:
+        # On failure, return empty set (caller will fallback to hint)
+        return set()
+    return changed
 
 
 def _build_segment_filter(seg_q: str, count_q: str):
@@ -1290,6 +1413,9 @@ def _normalize_end_times(db: DatabaseService, doc: str, version: int, min_dur: f
                 continue
             # derive start: prefer given; else previous end; else 0.0
             s = s_raw if s_raw is not None else (prev_end if prev_end is not None else 0.0)
+            # Ensure monotonically non-decreasing starts within a segment
+            if prev_end is not None and (s is None or s < prev_end):
+                s = prev_end
             # find next known start strictly greater than s for lookahead
             next_start = None
             for j in range(i+1, n):
@@ -1305,7 +1431,7 @@ def _normalize_end_times(db: DatabaseService, doc: str, version: int, min_dur: f
             # track prev_end for subsequent missing-start tokens
             prev_end = e
             # decide if update needed
-            need_update = (s_raw is None) or (e_raw is None) or (e_raw <= (s_raw if s_raw is not None else s)) or (e != e_raw) or (s_raw is None)
+            need_update = (s_raw is None) or (e_raw is None) or (e_raw <= (s_raw if s_raw is not None else s)) or (e != e_raw) or (s_raw is None) or (prev_end is not None and s_raw is not None and s_raw < prev_end)
             if need_update:
                 updated.append((float(s), float(e), doc, int(version), int(wi)))
     if updated:
@@ -1398,7 +1524,53 @@ def save_version():
         pass
 
     if current_app.config.get('ALIGN_PREALIGN_ON_SAVE', True):
-        updates, token_ops_block = _prealign_updates(db, doc, latest, words, seg_hint, neighbors)
+        # Determine changed segments vs. latest version (fallback to hint if uncertain)
+        changed_segments: set[int] = set()
+        try:
+            if latest and isinstance(latest.get('words'), list):
+                prev_words_norm = _normalize_words_json_all(latest['words'])
+                changed_segments = _detect_changed_segments(prev_words_norm, words)
+        except Exception:
+            changed_segments = set()
+
+        # If none detected, fallback to provided hint (single window)
+        if not changed_segments and (seg_hint is not None):
+            try:
+                changed_segments = { int(seg_hint) }
+            except Exception:
+                changed_segments = set()
+
+        # Call aligner per changed segment window and merge updates
+        all_updates: list[tuple[float,float,int]] = []
+        token_ops_block = None
+        if changed_segments:
+            try:
+                logger.info(f"[ALIGN] changed_segments={sorted(changed_segments)} neighbors={neighbors}")
+            except Exception:
+                pass
+            seen_wi = set()
+            for si in sorted(changed_segments):
+                u_i, tok_i = _prealign_updates(db, doc, latest, words, si, neighbors)
+                # Merge updates (last write wins per word_index)
+                for (s,e,wi) in (u_i or []):
+                    if wi in seen_wi:
+                        # replace existing for same wi: remove previous then add
+                        try:
+                            for k in range(len(all_updates)-1, -1, -1):
+                                if all_updates[k][2] == wi:
+                                    all_updates.pop(k)
+                                    break
+                        except Exception:
+                            pass
+                    all_updates.append((s,e,wi))
+                    seen_wi.add(wi)
+                # Prefer the first non-null token_ops block
+                if token_ops_block is None and tok_i is not None:
+                    token_ops_block = tok_i
+        else:
+            # Nothing to align
+            all_updates = []
+        updates = all_updates
     else:
         updates, token_ops_block = [], None
     words, words_json = _carry_over_timings(db, doc, latest, words)
@@ -1431,6 +1603,22 @@ def save_version():
                 "UPDATE transcript_words SET start_time=?, end_time=? WHERE file_path=? AND version=? AND word_index=?",
                 [ (s, e, doc, int(new_version), wi) for (s,e,wi) in updates ]
             )
+        # Backfill missing probabilities from previous version when word_index aligns
+        try:
+            if latest:
+                db.execute(
+                    """
+                    UPDATE transcript_words AS t
+                    SET probability = (
+                        SELECT p.probability FROM transcript_words AS p
+                        WHERE p.file_path = ? AND p.version = ? AND p.word_index = t.word_index
+                    )
+                    WHERE t.file_path = ? AND t.version = ? AND t.probability IS NULL
+                    """,
+                    [doc, int(latest['version']), doc, int(new_version)]
+                )
+        except Exception:
+            pass
         # Normalize end_time to ensure non-zero durations per token
         try:
             norm_count = 0 if client_words_were_empty else _normalize_end_times(db, doc, int(new_version), min_dur=0.20)

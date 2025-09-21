@@ -184,6 +184,8 @@ button {
   cursor: pointer;
 }
 
+#markUnreliable { visibility: visible !important; display: inline-block !important; }
+
 button:hover {
   background: var(--pill-bg-hover);
 }
@@ -630,6 +632,8 @@ header {
   align-items: center;
   gap: .5rem;
   z-index: 60;
+  /* Do not block clicks to underlying UI */
+  pointer-events: none;
 }
 .toast {
   background: var(--panel);

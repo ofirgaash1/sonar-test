@@ -45,8 +45,15 @@ if args.dev:
 # ---------------------------------------------------------------------------
 # 2. Logging to file + stdout
 # ---------------------------------------------------------------------------
+# Allow log level override via env (default INFO); use WARNING to suppress most chatter
+_lv_name = os.environ.get('LOG_LEVEL') or os.environ.get('EXPLORE_LOG_LEVEL') or 'INFO'
+try:
+    _LEVEL = getattr(logging, str(_lv_name).upper(), logging.INFO)
+except Exception:
+    _LEVEL = logging.INFO
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=_LEVEL,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
         logging.FileHandler("app.log", encoding="utf‑8"),
@@ -54,6 +61,16 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("run")
+
+# Quiet werkzeug request logs when running in quiet mode
+try:
+    if _LEVEL >= logging.WARNING:
+        logging.getLogger('werkzeug').setLevel(logging.WARNING)
+        logging.getLogger('posthog').setLevel(logging.WARNING)
+        # Also disable tqdm progress bars if present
+        os.environ.setdefault('TQDM_DISABLE', '1')
+except Exception:
+    pass
 
 # ---------------------------------------------------------------------------
 # 3. Decorator for timing
@@ -63,9 +80,10 @@ def timeit(name: str):
     def _decor(fn):
         def wrapper(*a, **kw):
             t0 = time.perf_counter()
-            log.info(f"▶ {name} …")
+            # ASCII-only to avoid Windows console codec issues
+            log.info(f">> {name} ...")
             out = fn(*a, **kw)
-            log.info(f"✓ {name} done in {(time.perf_counter()-t0):.2f}s")
+            log.info(f"OK {name} done in {(time.perf_counter()-t0):.2f}s")
             return out
         return wrapper
     return _decor
@@ -107,7 +125,11 @@ if not json_dir.is_dir():
 app = init_app(str(data_root))
 with app.app_context():
     file_records = init_file_service(json_dir, audio_dir)
-    print(file_records)
+    # Avoid dumping full file list to console (noisy with RTL paths)
+    try:
+        log.debug("File records loaded: %d", len(file_records))
+    except Exception:
+        pass
     from app import init_index_manager
     index_manager = init_index_manager(
         app,
@@ -140,8 +162,10 @@ with app.app_context():
 if __name__ == "__main__":
     host = "0.0.0.0"
     if args.dev:
-        log.info("DEV mode – http://localhost:5000")
-        app.run(host=host, port=5000, debug=False, threaded=True)
+        # ASCII hyphen to avoid en-dash in Windows console
+        log.info("DEV mode - http://127.0.0.1:5000")
+        # Bind explicitly to IPv4 loopback for local e2e
+        app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
     else:
         if not (Path(args.ssl_cert).exists() and Path(args.ssl_key).exists()):
             log.error("SSL cert/key not found. Use --dev for HTTP mode or supply valid paths.")
