@@ -9,6 +9,7 @@ import time
 import logging
 import uuid
 import glob
+from urllib.parse import unquote
 
 bp = Blueprint('audio', __name__)
 logger = logging.getLogger(__name__)
@@ -36,14 +37,9 @@ def _first_openable_path(candidates: list[str]) -> Optional[str]:
 
 def _file_size(p: str) -> Optional[int]:
     try:
-        with open(p, 'rb') as fh:
-            fh.seek(0, os.SEEK_END)
-            return fh.tell()
+        return os.path.getsize(p)
     except Exception:
-        try:
-            return os.path.getsize(p)
-        except Exception:
-            return None
+        return None
 
 
 def _maybe_follow_pointer(fs_path: str) -> tuple[str, Optional[int]]:
@@ -210,91 +206,18 @@ def serve_audio(filename):
         pass
 
     # Try to recover proper UTF-8 path from raw request URI (handles mojibake and double-encoding)
-    src_candidates = []
+    decoded_filename = unquote(filename)
+    
     try:
-        raw_uri = (request.environ.get('RAW_URI')
-                   or request.environ.get('REQUEST_URI')
-                   or (request.full_path or ''))
-        if raw_uri:
-            try:
-                base = raw_uri.split('?', 1)[0]
-                if '/audio/' in base:
-                    raw_seg = base.split('/audio/', 1)[1]
-                    # Generate multiple decoding variants
-                    from urllib.parse import unquote, unquote_to_bytes
-                    cand_texts = []
-                    try:
-                        cand_texts.append(unquote(raw_seg))
-                        cand_texts.append(unquote(unquote(raw_seg)))
-                    except Exception:
-                        pass
-                    try:
-                        b = unquote_to_bytes(raw_seg)
-                        cand_texts.append(b.decode('utf-8', 'ignore'))
-                        # Sometimes browsers double-encode; try a second pass
-                        cand_texts.append(unquote(b.decode('latin-1', 'ignore')))
-                    except Exception:
-                        pass
-                    for fixed in cand_texts:
-                        if fixed and fixed not in src_candidates:
-                            src_candidates.append(fixed)
-                    if cand_texts:
-                        logger.info(f"[TIMING] [REQ:{request_id}] recovered_from_uri_variants={list(map(repr, cand_texts))}")
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # Add best-effort re-decode of the provided param (route variable)
-    try:
-        from urllib.parse import unquote, unquote_to_bytes
-        # 1) Direct param
-        if filename not in src_candidates:
-            src_candidates.append(filename)
-        # 2) Percent-decoded once/twice
-        try:
-            dec1 = unquote(filename)
-            if dec1 and dec1 not in src_candidates:
-                src_candidates.append(dec1)
-            dec2 = unquote(dec1)
-            if dec2 and dec2 not in src_candidates:
-                src_candidates.append(dec2)
-        except Exception:
-            pass
-        # 3) Bytes route (handles malformed % sequences)
-        try:
-            b = unquote_to_bytes(filename)
-            u8 = b.decode('utf-8', 'ignore')
-            if u8 and u8 not in src_candidates:
-                src_candidates.append(u8)
-        except Exception:
-            pass
-        # 4) latin1->utf8 fallback
-        alt = filename.encode('latin-1', 'ignore').decode('utf-8', 'ignore')
-        if alt and alt not in src_candidates:
-            src_candidates.append(alt)
-            logger.info(f"[TIMING] [REQ:{request_id}] latin1->utf8 candidate={repr(alt)}")
-    except Exception:
-        pass
-
-    # Deduplicate while preserving order
-    _seen = set()
-    src_candidates = [x for x in src_candidates if not (x in _seen or _seen.add(x))]
-
-    try:
-        audio_path = None
-        for src in src_candidates:
-            audio_path = resolve_audio_path(src)
-            if audio_path:
-                break
+        audio_path = resolve_audio_path(decoded_filename)
         if audio_path:
             try:
                 logger.info(f"[TIMING] [REQ:{request_id}] Streaming local audio: {audio_path}")
                 logger.info(f"[TIMING] [REQ:{request_id}] audio_path.repr={repr(audio_path)}")
             except Exception:
                 pass
-            return send_range_file(audio_path, request_id, requested_name=filename)
-        logger.error(f"[TIMING] [REQ:{request_id}] Local audio not found. tried={list(map(repr, src_candidates))}")
+            return send_range_file(audio_path, request_id, requested_name=decoded_filename)
+        logger.error(f"[TIMING] [REQ:{request_id}] Local audio not found. tried={repr(decoded_filename)}")
         return (f"Audio not found: {filename}", 404)
         
     except Exception as e:

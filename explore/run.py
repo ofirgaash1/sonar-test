@@ -124,6 +124,17 @@ if not json_dir.is_dir():
 
 app = init_app(str(data_root))
 with app.app_context():
+    # Clean up database files if they exist
+    db_path = Path(app.config['SQLITE_PATH'])
+    if db_path.exists():
+        db_path.unlink()
+    db_shm_path = db_path.with_suffix('.sqlite-shm')
+    if db_shm_path.exists():
+        db_shm_path.unlink()
+    db_wal_path = db_path.with_suffix('.sqlite-wal')
+    if db_wal_path.exists():
+        db_wal_path.unlink()
+        
     file_records = init_file_service(json_dir, audio_dir)
     # Avoid dumping full file list to console (noisy with RTL paths)
     try:
