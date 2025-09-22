@@ -17,10 +17,40 @@ import requests
 
 from ..services.db import DatabaseService
 from .browser import _read_transcript_json  # reuse transcript JSON loader
-from ._helpers import ensure_schema, _carry_over_timings
 
+# --- Lightweight, idempotent schema migrations ---
+_TARGET_SCHEMA_VERSION = 3
 # Default number of segments to return when segment is provided without count
 _DEFAULT_SEGMENT_CHUNK = 50
+
+
+def _get_user_version(db: DatabaseService) -> int:
+    try:
+        cur = db.execute("PRAGMA user_version")
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    except Exception:
+        return 0
+
+
+def _set_user_version(db: DatabaseService, v: int) -> None:
+    db.execute(f"PRAGMA user_version = {int(v)}")
+
+
+def _table_exists(db: DatabaseService, name: str) -> bool:
+    cur = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", [name])
+    return cur.fetchone() is not None
+
+
+def _column_exists(db: DatabaseService, table: str, column: str) -> bool:
+    try:
+        cur = db.execute(f"PRAGMA table_info({table})")
+        for r in cur.fetchall() or []:
+            if len(r) >= 2 and str(r[1]).lower() == column.lower():
+                return True
+    except Exception:
+        pass
+    return False
 
 bp = Blueprint("transcripts", __name__, url_prefix="/transcripts")
 logger = logging.getLogger(__name__)
@@ -29,6 +59,211 @@ logger = logging.getLogger(__name__)
 def _db() -> DatabaseService:
     path = current_app.config.get('SQLITE_PATH') or 'explore.sqlite'
     return DatabaseService(path=str(path))
+
+
+def _ensure_schema(db: DatabaseService):
+    """Create/upgrade schema in an idempotent, versioned manner.
+
+    Uses SQLite PRAGMA user_version to track migrations.
+    """
+    current = _get_user_version(db)
+
+    # v1: Base tables
+    if current < 1:
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcripts (
+                file_path   TEXT NOT NULL,
+                version     INTEGER NOT NULL,
+                base_sha256 TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                words       TEXT NOT NULL,
+                created_by  TEXT,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (file_path, version)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcript_edits (
+                file_path      TEXT NOT NULL,
+                parent_version INTEGER NOT NULL,
+                child_version  INTEGER NOT NULL,
+                dmp_patch      TEXT,
+                token_ops      TEXT,
+                created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (file_path, parent_version, child_version)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcript_confirmations (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path    TEXT NOT NULL,
+                version      INTEGER NOT NULL,
+                base_sha256  TEXT NOT NULL,
+                start_offset INTEGER NOT NULL,
+                end_offset   INTEGER NOT NULL,
+                prefix       TEXT,
+                exact        TEXT,
+                suffix       TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcript_words (
+                file_path     TEXT NOT NULL,
+                version       INTEGER NOT NULL,
+                segment_index INTEGER NOT NULL,
+                word_index    INTEGER NOT NULL,
+                word          TEXT NOT NULL,
+                start_time    DOUBLE,
+                end_time      DOUBLE,
+                probability   DOUBLE,
+                PRIMARY KEY (file_path, version, word_index)
+            )
+            """
+        )
+        # Helpful indexes
+        db.execute("CREATE INDEX IF NOT EXISTS idx_transcripts_doc_ver ON transcripts(file_path, version)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_edits_doc_child ON transcript_edits(file_path, child_version)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_conf_doc_ver ON transcript_confirmations(file_path, version)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_tw_doc_ver_seg ON transcript_words(file_path, version, segment_index)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_tw_doc_ver ON transcript_words(file_path, version)")
+        _set_user_version(db, 1)
+
+    # v2: Backfill created_by column on transcripts if missing; add secondary indexes
+    if current < 2:
+        if not _column_exists(db, 'transcripts', 'created_by'):
+            db.execute("ALTER TABLE transcripts ADD COLUMN created_by TEXT")
+        # Ensure helpful indexes exist (idempotent)
+        db.execute("CREATE INDEX IF NOT EXISTS idx_transcripts_doc_ver ON transcripts(file_path, version)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_edits_doc_child ON transcript_edits(file_path, child_version)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_conf_doc_ver ON transcript_confirmations(file_path, version)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_tw_doc_ver_seg ON transcript_words(file_path, version, segment_index)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_tw_doc_ver ON transcript_words(file_path, version)")
+        _set_user_version(db, 2)
+
+    # v3: Defensive create-if-missing for all tables
+    if current < 3:
+        # Tables (no-op if already exist)
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcripts (
+                file_path   TEXT NOT NULL,
+                version     INTEGER NOT NULL,
+                base_sha256 TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                words       TEXT NOT NULL,
+                created_by  TEXT,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (file_path, version)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcript_edits (
+                file_path      TEXT NOT NULL,
+                parent_version INTEGER NOT NULL,
+                child_version  INTEGER NOT NULL,
+                dmp_patch      TEXT,
+                token_ops      TEXT,
+                created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (file_path, parent_version, child_version)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcript_confirmations (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path    TEXT NOT NULL,
+                version      INTEGER NOT NULL,
+                base_sha256  TEXT NOT NULL,
+                start_offset INTEGER NOT NULL,
+                end_offset   INTEGER NOT NULL,
+                prefix       TEXT,
+                exact        TEXT,
+                suffix       TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transcript_words (
+                file_path     TEXT NOT NULL,
+                version       INTEGER NOT NULL,
+                segment_index INTEGER NOT NULL,
+                word_index    INTEGER NOT NULL,
+                word          TEXT NOT NULL,
+                start_time    DOUBLE,
+                end_time      DOUBLE,
+                probability   DOUBLE,
+                PRIMARY KEY (file_path, version, word_index)
+            )
+            """
+        )
+        # Indexes
+        db.execute("CREATE INDEX IF NOT EXISTS idx_transcripts_doc_ver ON transcripts(file_path, version)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_edits_doc_child ON transcript_edits(file_path, child_version)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_conf_doc_ver ON transcript_confirmations(file_path, version)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_tw_doc_ver_seg ON transcript_words(file_path, version, segment_index)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_tw_doc_ver ON transcript_words(file_path, version)")
+
+        _set_user_version(db, 3)
+
+    # Post-check: ensure required columns exist even if user_version is incorrect
+    try:
+        # transcripts
+        if _table_exists(db, 'transcripts'):
+            if not _column_exists(db, 'transcripts', 'words'):
+                db.execute("ALTER TABLE transcripts ADD COLUMN words TEXT")
+            if not _column_exists(db, 'transcripts', 'created_by'):
+                db.execute("ALTER TABLE transcripts ADD COLUMN created_by TEXT")
+            if not _column_exists(db, 'transcripts', 'created_at'):
+                db.execute("ALTER TABLE transcripts ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            if not _column_exists(db, 'transcripts', 'base_sha256'):
+                db.execute("ALTER TABLE transcripts ADD COLUMN base_sha256 TEXT")
+            if not _column_exists(db, 'transcripts', 'text'):
+                db.execute("ALTER TABLE transcripts ADD COLUMN text TEXT")
+        # transcript_edits
+        if _table_exists(db, 'transcript_edits'):
+            if not _column_exists(db, 'transcript_edits', 'dmp_patch'):
+                db.execute("ALTER TABLE transcript_edits ADD COLUMN dmp_patch TEXT")
+            if not _column_exists(db, 'transcript_edits', 'token_ops'):
+                db.execute("ALTER TABLE transcript_edits ADD COLUMN token_ops TEXT")
+            if not _column_exists(db, 'transcript_edits', 'created_at'):
+                db.execute("ALTER TABLE transcript_edits ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        # transcript_confirmations
+        if _table_exists(db, 'transcript_confirmations'):
+            if not _column_exists(db, 'transcript_confirmations', 'base_sha256'):
+                db.execute("ALTER TABLE transcript_confirmations ADD COLUMN base_sha256 TEXT")
+            if not _column_exists(db, 'transcript_confirmations', 'prefix'):
+                db.execute("ALTER TABLE transcript_confirmations ADD COLUMN prefix TEXT")
+            if not _column_exists(db, 'transcript_confirmations', 'exact'):
+                db.execute("ALTER TABLE transcript_confirmations ADD COLUMN exact TEXT")
+            if not _column_exists(db, 'transcript_confirmations', 'suffix'):
+                db.execute("ALTER TABLE transcript_confirmations ADD COLUMN suffix TEXT")
+            if not _column_exists(db, 'transcript_confirmations', 'created_at'):
+                db.execute("ALTER TABLE transcript_confirmations ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        # transcript_words
+        if _table_exists(db, 'transcript_words'):
+            if not _column_exists(db, 'transcript_words', 'segment_index'):
+                db.execute("ALTER TABLE transcript_words ADD COLUMN segment_index INTEGER")
+            if not _column_exists(db, 'transcript_words', 'start_time'):
+                db.execute("ALTER TABLE transcript_words ADD COLUMN start_time DOUBLE")
+            if not _column_exists(db, 'transcript_words', 'end_time'):
+                db.execute("ALTER TABLE transcript_words ADD COLUMN end_time DOUBLE")
+            if not _column_exists(db, 'transcript_words', 'probability'):
+                db.execute("ALTER TABLE transcript_words ADD COLUMN probability DOUBLE")
+    finally:
+        db.commit()
 
 
 def _sha256_hex(s: str) -> str:
@@ -374,7 +609,35 @@ def _canonicalize_text(s: str) -> str:
         return str(s or '')
 
 
+def _tokenize_text_to_words(text: str) -> list:
+    """Tokenize text into words while preserving whitespace runs and newlines.
 
+    - Emits non-whitespace runs verbatim as tokens
+    - Emits whitespace runs (spaces/tabs etc.) as separate tokens to preserve spacing
+    - Emits a {'word': '\n'} token between lines to preserve segment boundaries
+    - No timings/probabilities are set here
+    """
+    words = []
+    for line in (text or '').splitlines():
+        buf = ''
+        is_space = None
+        for ch in line:
+            ch_is_space = ch.isspace() and ch != '\n'
+            if is_space is None:
+                buf = ch
+                is_space = ch_is_space
+            elif ch_is_space == is_space:
+                buf += ch
+            else:
+                if buf:
+                    words.append({'word': buf})
+                buf = ch
+                is_space = ch_is_space
+        if buf:
+            words.append({'word': buf})
+        # segment separator
+        words.append({'word': '\n'})
+    return words
 
 
 def _explode_resp_words_if_needed(resp_words: list) -> list:
@@ -468,8 +731,7 @@ def _ensure_words_match_text(text: str, words: list) -> list:
     except Exception:
         pass
     # 3) Retokenize only when content differs materially
-    new_words = _tokenize_text_to_words(text)
-    return _carry_over_timings(old_words=words, new_words=new_words)
+    return _tokenize_text_to_words(text)
 
 
 def _validate_and_sanitize_words(words: list) -> list:
@@ -669,7 +931,7 @@ def _prealign_updates(db: DatabaseService, doc: str, latest: Optional[dict], wor
     return updates, token_ops_block
 
 
-def _carry_over_timings_from_db(db: DatabaseService, doc: str, latest: Optional[dict], words: list) -> tuple[list, str]:
+def _carry_over_timings(db: DatabaseService, doc: str, latest: Optional[dict], words: list) -> tuple[list, str]:
     """Carry over timings/probabilities from previous version for unchanged tokens.
 
     Returns (enriched_words, words_json). If enrichment fails, returns the
@@ -1185,7 +1447,7 @@ def get_latest():
     if not doc:
         abort(400, 'missing ?doc=')
     _ensure_safe_doc(doc)
-    db = _db(); ensure_schema(db)
+    db = _db(); _ensure_schema(db)
     row = _latest_row(db, doc)
     return jsonify(row or {})
 
@@ -1197,7 +1459,7 @@ def get_version():
     if not doc or not version.isdigit():
         abort(400, 'missing ?doc= and/or ?version=')
     _ensure_safe_doc(doc)
-    db = _db(); ensure_schema(db)
+    db = _db(); _ensure_schema(db)
     row = _row_for_version(db, doc, int(version))
     if not row:
         abort(404, 'version not found')
@@ -1226,7 +1488,7 @@ def save_version():
     # Validate input words structure early
     words = _validate_and_sanitize_words(words)
 
-    db = _db(); ensure_schema(db)
+    db = _db(); _ensure_schema(db)
     latest = _latest_row(db, doc)
 
     # Concurrency/consistency gate
@@ -1311,7 +1573,7 @@ def save_version():
         updates = all_updates
     else:
         updates, token_ops_block = [], None
-    words, words_json = _carry_over_timings_from_db(db, doc, latest, words)
+    words, words_json = _carry_over_timings(db, doc, latest, words)
 
     # Recompose authoritative text from words and canonicalize for storage + hashing
     try:
@@ -1385,7 +1647,7 @@ def save_version():
         try:
             # Debug: how many tokens have timings after save
             cur = db.execute(
-                "SELECT COUNT(*), SUM(CASE WHEN start_time IS NOT NULL AND end_time IS NOT NULL AND end_time > start_time THEN 1 ELSE 0 END) FROM transcript_words WHERE file_path=? AND version=?",
+                "SELECT COUNT(*), SUM(CASE WHEN start_time IS NOT NULL OR end_time IS NOT NULL THEN 1 ELSE 0 END) FROM transcript_words WHERE file_path=? AND version=?",
                 [doc, int(new_version)]
             )
             row = cur.fetchone() or [0, 0]
@@ -1404,7 +1666,7 @@ def list_edits():
     doc = request.args.get('doc', '').strip()
     if not doc:
         abort(400, 'missing ?doc=')
-    db = _db(); ensure_schema(db)
+    db = _db(); _ensure_schema(db)
     cur = db.execute(
         """
         SELECT parent_version, child_version, dmp_patch, token_ops
@@ -1439,7 +1701,7 @@ def align_segment():
         abort(400, 'missing doc/segment')
     _ensure_safe_doc(doc)
 
-    db = _db(); ensure_schema(db)
+    db = _db(); _ensure_schema(db)
     # Resolve version (latest if not provided)
     if version is None:
         latest = _latest_row(db, doc)
@@ -1666,7 +1928,7 @@ def migrate_words():
     if not doc:
         abort(400, 'missing doc')
     _ensure_safe_doc(doc)
-    db = _db(); ensure_schema(db)
+    db = _db(); _ensure_schema(db)
 
     def _synth_words(text: str) -> list:
         # naive synthesis: split by whitespace; no timings/probabilities
@@ -1714,12 +1976,11 @@ def migrate_words():
 @bp.route('/confirmations', methods=['GET'])
 def get_confirmations():
     doc = request.args.get('doc', '').strip()
-   
     version = request.args.get('version', '').strip()
     if not doc or not version.isdigit():
         abort(400, 'missing ?doc= and/or ?version=')
     _ensure_safe_doc(doc)
-    db = _db(); ensure_schema(db)
+    db = _db(); _ensure_schema(db)
     cur = db.execute(
         "SELECT id, start_offset, end_offset, prefix, exact, suffix FROM transcript_confirmations WHERE file_path=? AND version=? ORDER BY start_offset ASC",
         [doc, int(version)]
@@ -1742,7 +2003,7 @@ def history():
     if not doc:
         abort(400, 'missing ?doc=')
     _ensure_safe_doc(doc)
-    db = _db(); ensure_schema(db)
+    db = _db(); _ensure_schema(db)
 
     # Load all transcript versions
     cur = db.execute(
@@ -1795,7 +2056,7 @@ def get_words():
     if not doc or not version.isdigit():
         abort(400, 'missing ?doc= and/or ?version=')
     _ensure_safe_doc(doc)
-    db = _db(); ensure_schema(db)
+    db = _db(); _ensure_schema(db)
     # Build segment filter
     seg_filter_sql, extra_params, window = _build_segment_filter(seg_q, count_q)
     params = [doc, int(version), *extra_params]
@@ -1848,7 +2109,7 @@ def save_confirmations():
     if not isinstance(items, list):
         abort(400, 'items must be an array')
 
-    db = _db(); ensure_schema(db)
+    db = _db(); _ensure_schema(db)
     # Validate against stored version hash
     row = _row_for_version(db, doc, int(version))
     if not row:
@@ -1881,3 +2142,8 @@ def save_confirmations():
 
     return jsonify({"count": len(items)})
 
+
+@bp.after_request
+def add_cors(resp):
+    # CORS is applied centrally in app.after_request
+    return resp

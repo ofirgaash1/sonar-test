@@ -15,6 +15,8 @@ import sys
 import time
 from pathlib import Path
 
+import orjson
+
 from app import create_app
 from app.utils import get_transcripts
 from app.services.index import IndexManager
@@ -45,32 +47,63 @@ if args.dev:
 # ---------------------------------------------------------------------------
 # 2. Logging to file + stdout
 # ---------------------------------------------------------------------------
-# Allow log level override via env (default INFO); use WARNING to suppress most chatter
-_lv_name = os.environ.get('LOG_LEVEL') or os.environ.get('EXPLORE_LOG_LEVEL') or 'INFO'
-try:
-    _LEVEL = getattr(logging, str(_lv_name).upper(), logging.INFO)
-except Exception:
-    _LEVEL = logging.INFO
+def _configure_logging():
+    # Allow log level override via env (default INFO); use WARNING to suppress most chatter
+    _lv_name = os.environ.get('LOG_LEVEL') or os.environ.get('EXPLORE_LOG_LEVEL') or 'INFO'
+    try:
+        _LEVEL = getattr(logging, str(_lv_name).upper(), logging.INFO)
+    except Exception:
+        _LEVEL = logging.INFO
 
-logging.basicConfig(
-    level=_LEVEL,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler("app.log", encoding="utf‑8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
+    # Use a custom formatter to include extra data
+    class JsonFormatter(logging.Formatter):
+        def format(self, record):
+            log_record = {
+                "timestamp": self.formatTime(record, self.datefmt),
+                "level": record.levelname,
+                "message": record.getMessage(),
+            }
+            if hasattr(record, 'data'):
+                log_record['data'] = record.data
+            return orjson.dumps(log_record).decode('utf-8')
+
+    # Clear any existing handlers
+    root_logger = logging.getLogger()
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+
+    # Create a handler that writes to a file, rotating it when it gets large
+    from logging.handlers import RotatingFileHandler
+    file_handler = RotatingFileHandler("app.log", maxBytes=10*1024*1024, backupCount=5, encoding="utf-8")
+    
+    # Use a simple format for the console
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    console_handler.setFormatter(console_formatter)
+
+    # Set the formatter and level for the file handler
+    # We will log JSON to the file for easier parsing
+    # file_handler.setFormatter(JsonFormatter()) # TODO: Re-enable when we have a log parser
+    file_handler.setFormatter(console_formatter)
+
+
+    logging.basicConfig(
+        level=_LEVEL,
+        handlers=[file_handler, console_handler],
+    )
+
+    # Quiet werkzeug request logs when running in quiet mode
+    try:
+        if _LEVEL >= logging.WARNING:
+            logging.getLogger('werkzeug').setLevel(logging.WARNING)
+            logging.getLogger('posthog').setLevel(logging.WARNING)
+            # Also disable tqdm progress bars if present
+            os.environ.setdefault('TQDM_DISABLE', '1')
+    except Exception:
+        pass
+
+_configure_logging()
 log = logging.getLogger("run")
-
-# Quiet werkzeug request logs when running in quiet mode
-try:
-    if _LEVEL >= logging.WARNING:
-        logging.getLogger('werkzeug').setLevel(logging.WARNING)
-        logging.getLogger('posthog').setLevel(logging.WARNING)
-        # Also disable tqdm progress bars if present
-        os.environ.setdefault('TQDM_DISABLE', '1')
-except Exception:
-    pass
 
 # ---------------------------------------------------------------------------
 # 3. Decorator for timing

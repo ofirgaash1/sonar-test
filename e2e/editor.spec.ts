@@ -85,10 +85,10 @@ test.describe('Editor E2E', () => {
         SQLITE_JOURNAL: 'WAL',
         FLASK_ENV: 'development',
         TS_USER_EMAIL: 'tester@example.com',
-        LOG_LEVEL: 'WARNING',
+        LOG_LEVEL: 'INFO',
         TQDM_DISABLE: '1'
       },
-      stdio: 'inherit'
+      stdio: ['ignore', fs.openSync('app_stdout.log', 'a'), fs.openSync('app_stderr.log', 'a')]
     });
     await waitForServer('http://127.0.0.1:5000/folders');
   });
