@@ -518,6 +518,7 @@ def align_segment():
         pass
 
     # Persist timing updates for matched tokens (so inserts around the window still benefit)
+    updated_count = len(updates)
     if updates:
         try:
             db.execute("BEGIN IMMEDIATE TRANSACTION")
@@ -527,7 +528,6 @@ def align_segment():
             )
             db.commit()
             try:
-                logger.info(f"[ALIGN] timings updated: {len(updates)} tokens")
             except Exception:
                 pass
         except Exception:
@@ -580,6 +580,7 @@ def align_segment():
         t_utils.log_info(f"[ALIGN] align_segment elapsed_ms={(time.time()-_t0)*1000:.1f} matched={matched} diffs={len(diffs)}")
     except Exception:
         pass
+    t_utils.log_info(f"[ALIGN] timings updated: {updated_count} tokens")
     return jsonify({
         'ok': True,
         'changed_count': len([d for d in diffs if abs(d.get('delta_start', 0)) > 1e-3 or abs(d.get('delta_end', 0)) > 1e-3]),

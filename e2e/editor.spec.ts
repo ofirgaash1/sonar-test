@@ -77,6 +77,13 @@ test.describe('Editor E2E', () => {
       useDataDir = tmpDir;
     }
 
+    // Clean previous log files to avoid stale assertions
+    for (const logName of ['app.log', 'app_stdout.log', 'app_stderr.log', 'app_run.log']) {
+      try {
+        fs.rmSync(path.join(process.cwd(), logName), { force: true });
+      } catch { }
+    }
+
     // Start backend in dev mode (bypass auth)
     proc = spawn('python', ['explore/run.py', '--data-dir', useDataDir, '--dev'], {
       env: {
@@ -248,6 +255,7 @@ test.describe('Editor E2E', () => {
       }
       return { total, timeCount, probCount, nonZeroStarts, endGTStart };
     });
+    console.log('statsAfter', statsAfter);
 
     // Timings should not regress after save
     expect(statsAfter.timeCount).toBeGreaterThan(0);

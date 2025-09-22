@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 import uuid
+import difflib
 from typing import Optional
 
 import orjson
@@ -171,30 +172,82 @@ def build_new_window(words: list, start_seg: int, end_seg: int):
     return window, transcript
 
 
-def map_aligned_to_updates(new_window, aligned_words, offset: float, min_dur: float = 0.20) -> tuple[list[tuple[float, float, int]], int]:
-    updates = []
-    matched = 0
-    for (idx, word, _seg), aligned in zip(new_window, aligned_words):
+def map_aligned_to_updates(new_window: list[tuple[int, str, int]], resp_words: list, offset: float, min_dur: float = 0.20) -> tuple[list[tuple[float, float, int]], int]:
+    def _norm(val):
         try:
-            aw = str((aligned or {}).get('word') or '')
+            return str(val or '').strip()
         except Exception:
-            aw = ''
-        if aw and aw == word:
-            try:
-                start = float((aligned or {}).get('start') or 0.0) + float(offset)
-            except Exception:
-                start = 0.0
-            try:
-                end = float((aligned or {}).get('end') or 0.0) + float(offset)
-            except Exception:
-                end = start + min_dur
-            if end <= start:
-                end = start + min_dur
-            updates.append((start, end, idx))
+            return ''
+
+    new_seq = [(idx, _norm(word)) for (idx, word, _seg) in new_window if _norm(word) != '']
+    resp_seq = [((w or {}), _norm((w or {}).get('word'))) for w in (resp_words or []) if _norm((w or {}).get('word')) != '']
+
+    updates: list[tuple[float, float, int]] = []
+    matched = 0
+
+    if len(resp_seq) == 1 and len(new_seq) > 1:
+        rw = resp_seq[0][0]
+        try:
+            rs = float(rw.get('start') or 0.0) + offset
+        except Exception:
+            rs = offset
+        try:
+            re = float(rw.get('end') or 0.0) + offset
+        except Exception:
+            re = rs
+        if re <= rs:
+            re = rs + 0.01
+        span = re - rs
+        total_chars = sum(max(1, len(token_text)) for (_wi, token_text) in new_seq) or len(new_seq)
+        cur = rs
+        for idx, (wi, token_text) in enumerate(new_seq):
+            if idx == len(new_seq) - 1:
+                ns = cur
+                ne = re if re > ns else (ns + 0.01)
+            else:
+                frac = max(1, len(token_text)) / total_chars
+                dur = max(0.01, span * frac)
+                ns = cur
+                ne = min(re, ns + dur)
+            updates.append((float(ns), float(ne), int(wi)))
             matched += 1
+            cur = ne
+        return updates, matched
+
+    new_tokens = [token for (_wi, token) in new_seq]
+    resp_tokens = [token for (_rw, token) in resp_seq]
+    matcher = difflib.SequenceMatcher(a=new_tokens, b=resp_tokens)
+
+    def _resp_time(idx: int) -> tuple[float, float]:
+        rw = resp_seq[idx][0]
+        try:
+            rs = float(rw.get('start') or 0.0) + offset
+        except Exception:
+            rs = offset
+        try:
+            re = float(rw.get('end') or 0.0) + offset
+        except Exception:
+            re = rs
+        if not (re > rs):
+            next_rs = None
+            if (idx + 1) < len(resp_seq):
+                try:
+                    rn = resp_seq[idx + 1][0]
+                    next_rs = float(rn.get('start') or 0.0) + offset
+                except Exception:
+                    next_rs = None
+            re = next_rs if (next_rs is not None and next_rs > rs) else (rs + float(min_dur))
+        return float(rs), float(re)
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            for rel in range(i2 - i1):
+                wi = new_seq[i1 + rel][0]
+                rs, re = _resp_time(j1 + rel)
+                updates.append((rs, re, int(wi)))
+                matched += 1
+
     return updates, matched
-
-
 def compute_clip_from_prev_rows(prev_rows) -> tuple[Optional[float], Optional[float]]:
     starts = [float(row[2]) for row in prev_rows if row[2] is not None]
     ends = [float(row[3]) for row in prev_rows if row[3] is not None]

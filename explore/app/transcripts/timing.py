@@ -10,6 +10,7 @@ from flask import current_app
 
 from ..services.db import DatabaseService
 from . import db_ops
+from . import utils
 
 BaselineLoader = Callable[[Path, str, str], Optional[dict]]
 
@@ -59,7 +60,7 @@ def _build_prev_sequence_from_db(db: DatabaseService, doc: str, latest: Optional
         FROM transcript_words
         WHERE file_path=? AND version=?
         ORDER BY word_index ASC
-        """
+        """,
         [doc, int(latest['version'])]
     )
     prev_rows = cur.fetchall() or []
@@ -134,8 +135,9 @@ def _as_prev_token(word: str, start: Optional[float], end: Optional[float], prob
     return _PrevToken(word=word, start=start, end=end, prob=prob, kind='word', key=stripped)
 
 
-def _assign_from_prev(prev_tokens: List[_PrevToken], words: list) -> list:
-    results = []
+def _assign_from_prev(prev_tokens: List[_PrevToken], words: list) -> tuple[list, int]:
+    results: list = []
+    assigned = 0
     cursor = 0
     total = len(prev_tokens)
 
@@ -171,15 +173,14 @@ def _assign_from_prev(prev_tokens: List[_PrevToken], words: list) -> list:
             if enriched.get('start') in (None, '') or float(enriched.get('start') or 0.0) == 0.0:
                 if match.start is not None:
                     enriched['start'] = match.start
+                    assigned += 1
             if enriched.get('end') in (None, '') or float(enriched.get('end') or 0.0) == 0.0:
                 if match.end is not None:
                     enriched['end'] = match.end
             if enriched.get('probability') in (None, '') and match.prob is not None:
                 enriched['probability'] = match.prob
         results.append(enriched)
-    return results
-
-
+    return results, assigned
 def carry_over_timings_from_db(
     db: DatabaseService,
     doc: str,
@@ -195,8 +196,9 @@ def carry_over_timings_from_db(
         if not prev_tokens:
             prev_tokens = _build_prev_sequence_from_baseline(doc, baseline_loader)
         if prev_tokens:
-            enriched = _assign_from_prev(prev_tokens, words)
+            enriched, assigned_count = _assign_from_prev(prev_tokens, words)
         else:
+            assigned_count = 0
             enriched = words
     except Exception:
         enriched = words
@@ -204,4 +206,5 @@ def carry_over_timings_from_db(
         words_json = orjson.dumps(enriched).decode('utf-8')
     except Exception:
         words_json = orjson.dumps(words or []).decode('utf-8')
+    utils.log_info(f"[TIMING] carry_over assigned={assigned_count} total={len(enriched or [])}")
     return enriched, words_json
