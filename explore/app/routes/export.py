@@ -187,8 +187,18 @@ def _load_words(db: DatabaseService, doc: str, version: int):
         last_seg = None
         for seg, wi, word, st, en, pr in rows:
             if last_seg is not None and seg != last_seg:
-                out.append({ 'word': '\n', 'start': st or 0.0, 'end': st or 0.0, 'probability': None })
-            out.append({ 'word': word, 'start': float(st) if st is not None else 0.0, 'end': float(en) if en is not None else (float(st) if st is not None else 0.0), 'probability': float(pr) if pr is not None else None })
+                # CRITICAL: Do NOT generate artificial timing data by defaulting to 0.0
+                # If timing data is missing, leave it as None to expose the bug
+                start_val = float(st) if st is not None else None
+                out.append({ 'word': '\n', 'start': start_val, 'end': start_val, 'probability': None })
+            # CRITICAL: Do NOT generate artificial timing data by defaulting to 0.0
+            # If timing data is missing, leave it as None to expose the bug
+            start_val = float(st) if st is not None else None
+            end_val = float(en) if en is not None else None
+            # If we don't have end time but have start time, end can equal start
+            if end_val is None and start_val is not None:
+                end_val = start_val
+            out.append({ 'word': word, 'start': start_val, 'end': end_val, 'probability': float(pr) if pr is not None else None })
             last_seg = seg
         return out
     # Fallback to stored JSON
@@ -201,7 +211,9 @@ def _load_words(db: DatabaseService, doc: str, version: int):
             pass
     # Fallback to plain text split to a single segment
     text = (row or {}).get('text') or ''
-    return ([{ 'word': text, 'start': 0.0, 'end': 0.0 }])
+    # CRITICAL: Do NOT generate artificial timing data by defaulting to 0.0
+    # If timing data is missing, leave it as None to expose the bug
+    return ([{ 'word': text, 'start': None, 'end': None }])
 
 
 def _segments_from_words(words):

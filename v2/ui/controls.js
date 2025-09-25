@@ -3,8 +3,51 @@ import { store, getState } from '../core/state.js';
 import { showToast } from './toast.js';
 import { canonicalizeText } from '../shared/canonical.js';
 import { verifyChainHash } from '../history/verify-chain.js';
-import { saveTranscriptVersion, alignSegment, markCorrection, getLatestTranscript, getTranscriptVersion, getTranscriptWords, saveConfirmations, getConfirmations, sha256Hex } from '../data/api.js';
+import api from '../data/api.js';
 import { computeAbsIndexMap } from '../render/overlay.js';
+
+function validateTimingData(words) {
+  /**
+   * Validate timing data for monotonicity and reject fake timing patterns.
+   * Throws Error if timing data is invalid.
+   */
+  if (!Array.isArray(words) || !words.length) {
+    return;
+  }
+  
+  const fakeTimingPattern = /^999999999\d/;
+  
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const start = word.start;
+    const end = word.end;
+    
+    // Check for fake timing patterns
+    if (start != null && fakeTimingPattern.test(String(start))) {
+      throw new Error(`Fake timing data detected: word "${word.word || ''}" has fake start time ${start}`);
+    }
+    
+    if (end != null && fakeTimingPattern.test(String(end))) {
+      throw new Error(`Fake timing data detected: word "${word.word || ''}" has fake end time ${end}`);
+    }
+    
+    // Check for valid timing data
+    if (start != null && end != null) {
+      if (end < start) {
+        throw new Error(`Invalid timing data: word "${word.word || ''}" end (${end}) < start (${start})`);
+      }
+      
+      // Check monotonicity with previous word
+      if (i > 0) {
+        const prevWord = words[i-1];
+        const prevEnd = prevWord.end;
+        if (prevEnd != null && start < prevEnd) {
+          throw new Error(`Non-monotonic timing: word "${word.word || ''}" starts at ${start} but previous word ends at ${prevEnd}`);
+        }
+      }
+    }
+  }
+}
 
 export function setupUIControls(els, { workers, mergeModal }, virtualizer, playerCtrl, isIdle) {
   const dbg = (...args) => { try { if ((localStorage.getItem('v2:debug') || '').toLowerCase() === 'on') console.log(...args); } catch {} };
@@ -83,8 +126,12 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
     for (const t of (tokens || [])) {
       if (!t || t.state === 'del') continue;
       if (t.word === '\n') { if (cur) { segs.push(cur); cur = null; } continue; }
-      if (!cur) cur = { words: [], start: Number.isFinite(t.start) ? +t.start : 0, end: Number.isFinite(t.end) ? +t.end : 0 };
-      cur.words.push({ word: String(t.word || ''), start: +t.start || 0, end: +t.end || ((+t.start || 0) + 0.25), probability: Number.isFinite(t.probability) ? +t.probability : undefined });
+      // CRITICAL: Do NOT generate artificial timing data by defaulting to 0
+      // If timing data is missing, leave it as null to expose the bug
+      if (!cur) cur = { words: [], start: Number.isFinite(t.start) ? +t.start : null, end: Number.isFinite(t.end) ? +t.end : null };
+      const startVal = Number.isFinite(+t.start) ? +t.start : null;
+      const endVal = Number.isFinite(+t.end) ? +t.end : null;
+      cur.words.push({ word: String(t.word || ''), start: startVal, end: endVal, probability: Number.isFinite(t.probability) ? +t.probability : undefined });
       cur.end = Number.isFinite(t.end) ? +t.end : cur.end;
     }
     if (cur) segs.push(cur);
@@ -154,7 +201,7 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
     const measure = (node, off) => { const rng = document.createRange(); rng.selectNodeContents(container); try { rng.setEnd(node, off); } catch { return 0; } return rng.toString().length; };
     const s = measure(r.startContainer, r.startOffset); const e = measure(r.endContainer, r.endOffset); return [Math.min(s,e), Math.max(s,e)];
   };
-  const mayConfirmNow = async () => { const st = getState(); if (!st || !(st.version > 0) || !st.base_sha256) return false; try { const txt = canonicalizeText(st.liveText||''); const h = await sha256Hex(txt); return !!h && h === st.base_sha256; } catch { return false; } };
+  const mayConfirmNow = async () => { const st = getState(); if (!st || !(st.version > 0) || !st.base_sha256) return false; try { const txt = canonicalizeText(st.liveText||''); const h = await api.api.sha256Hex(txt); return !!h && h === st.base_sha256; } catch { return false; } };
   const waitForConfirmable = async (timeoutMs = 2500) => {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
@@ -173,10 +220,10 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
       const txt = canonicalizeText(st.liveText||'');
       const ranges = (st.confirmedRanges || []).map(x => x.range);
       const filePath = `${els.transcript?.dataset.folder}/${els.transcript?.dataset.file}`;
-      await saveConfirmations(filePath, st.version, st.base_sha256 || '', ranges, txt);
+      await api.saveConfirmations(filePath, st.version, st.base_sha256 || '', ranges, txt);
       // Round-trip reload to ensure persistence and normalize server state
       try {
-        const confs = await getConfirmations(filePath, st.version);
+        const confs = await api.getConfirmations(filePath, st.version);
         const norm = (confs || []).map(c => ({ id: c.id, range: c.range }));
         store.setConfirmedRanges(norm);
       } catch { /* ignore reload error */ }
@@ -372,33 +419,53 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
       const out = new Array(next.length);
       const nextAbs = computeAbsIndexMap(next);
       const prevAbs = computeAbsIndexMap(prev);
-      // Build prev ranges with probs
+      // Build prev ranges with probs and timings
       const prevRanges = [];
+      const prevTiming = [];
       for (let i = 0; i < prev.length; i++) {
         const p = prev[i] || {};
-        if (!Number.isFinite(p.probability)) continue;
-        const s = prevAbs[i] || 0;
-        const e = s + (p.word ? String(p.word).length : 0);
-        prevRanges.push({ s, e, prob: +p.probability });
+        const absStart = prevAbs[i] || 0;
+        const absEnd = absStart + (p.word ? String(p.word).length : 0);
+        if (Number.isFinite(p.probability)) {
+          prevRanges.push({ s: absStart, e: absEnd, prob: +p.probability });
+        }
+        if (Number.isFinite(p.start) || Number.isFinite(p.end)) {
+          prevTiming.push({ s: absStart, e: absEnd, start: Number.isFinite(+p.start) ? +p.start : NaN, end: Number.isFinite(+p.end) ? +p.end : NaN });
+        }
       }
       const overlap = (aS, aE, bS, bE) => (aS < bE && bS < aE);
       for (let i = 0; i < next.length; i++) {
         const t = next[i] || {};
+        const sAbs = nextAbs[i] || 0;
+        const eAbs = sAbs + (t.word ? String(t.word).length : 0);
         let prob = t.probability;
         if (!Number.isFinite(prob)) {
-          const s = nextAbs[i] || 0;
-          const e = s + (t.word ? String(t.word).length : 0);
-          // Find any overlapping prev range and take the max prob
           let best = NaN;
           for (const r of prevRanges) {
-            if (overlap(s, e, r.s, r.e)) {
+            if (overlap(sAbs, eAbs, r.s, r.e)) {
               if (!Number.isFinite(best) || r.prob > best) best = r.prob;
             }
           }
           if (Number.isFinite(best)) prob = best;
         }
+        let start = Number.isFinite(+t.start) ? +t.start : NaN;
+        let end = Number.isFinite(+t.end) ? +t.end : NaN;
+        if ((!Number.isFinite(start) || start <= 0) || (!Number.isFinite(end) || end <= 0)) {
+          for (const r of prevTiming) {
+            if (!Number.isFinite(r.start) || !Number.isFinite(r.end)) continue;
+            if (overlap(sAbs, eAbs, r.s, r.e)) {
+              if (!Number.isFinite(start) || start <= 0) start = r.start;
+              if (!Number.isFinite(end) || end <= 0) end = r.end;
+              break;
+            }
+          }
+        }
         const copy = { ...t };
         if (Number.isFinite(prob)) copy.probability = prob;
+        if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+          copy.start = start;
+          copy.end = end;
+        }
         out[i] = copy;
       }
       return out;
@@ -420,13 +487,13 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
     try {
       // Early client-side conflict check: if server has a newer version than our base, show merge modal
       try {
-        const latestProbe = await getLatestTranscript(filePath);
+        const latestProbe = await api.getLatestTranscript(filePath);
         if (latestProbe && Number.isFinite(+st.version) && (+st.version > 0) && +latestProbe.version !== +st.version) {
           const parentVer = +st.version || 0;
-          const parent = await getTranscriptVersion(filePath, parentVer);
+          const parent = await api.getTranscriptVersion(filePath, parentVer);
           const parentText = canonicalizeText(parent?.text || st.baselineText || '');
           const latestText = canonicalizeText(latestProbe?.text || '');
-          const baseHash = await sha256Hex(parentText);
+          const baseHash = await api.sha256Hex(parentText);
           const { diffs: d1 } = await workers.diff.send(parentText, latestText, { editCost: 8, timeoutSec: 0.8 });
           const { diffs: d2 } = await workers.diff.send(parentText, text, { editCost: 8, timeoutSec: 0.8 });
           const payload = {
@@ -462,15 +529,14 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
       let wordsForSave = buildWordsForSaveFromText(text);
       const stats = computeWindowStats(tokens, segIdxGuess, 1);
       dbg(`[dbg] save:start tokens=${tokens.length} with_timing=${countWithTimings(tokens)} seg=${segIdxGuess} window_words=${stats.words} window_sec=${stats.seconds.toFixed(3)}`);
-      // Show a generic toast before save; detailed toast will be shown right before align
-      openAlignToast();
-      const res = await saveTranscriptVersion(filePath, { parentVersion: parentVersionGuess, text, words: wordsForSave, expectedBaseSha256, segment: Math.max(0, segIdxGuess), neighbors: 1 });
+      // Don't show alignment toast until we have actual alignment data
+      const res = await api.saveTranscriptVersion(filePath, { parentVersion: parentVersionGuess, text, words: wordsForSave, expectedBaseSha256, segment: Math.max(0, segIdxGuess), neighbors: 1 });
       const childV = res?.version; const parentV = (typeof childV === 'number' && childV > 1) ? (childV - 1) : null;
       dbg(`[dbg] save:done version=${childV} base_sha256=${res?.base_sha256 ? String(res.base_sha256).slice(0,8) : ''}`);
       store.setState({ version: childV || 0, base_sha256: res?.base_sha256 || st.base_sha256 || '' }, 'version:saved');
       // Immediately refresh words from the saved version to reflect server-side normalization
       try {
-        const wordsNow = await getTranscriptWords(filePath, childV);
+        const wordsNow = await api.getTranscriptWords(filePath, childV);
         if (Array.isArray(wordsNow) && wordsNow.length) {
           const prevToks = (getState().tokens || []).slice();
           const enrichedNow = mergeProbabilities(wordsNow, prevToks);
@@ -480,12 +546,17 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
         }
       } catch {}
       // Trigger alignment in background to keep UI responsive and allow queued saves
+      let alignmentTriggered = false;
       try {
         if (typeof childV === 'number') {
           const segHint = Math.max(0, segIdxGuess);
           const statsCopy = { words: stats.words, seconds: stats.seconds };
-          if ((statsCopy.words > 0) && (statsCopy.seconds > 0)) openAlignToast(statsCopy.words, statsCopy.seconds); else openAlignToast();
-          Promise.resolve().then(async () => {
+          if ((statsCopy.words > 0) && (statsCopy.seconds > 0)) {
+            openAlignToast(statsCopy.words, statsCopy.seconds);
+            alignmentTriggered = true;
+          }
+          if (alignmentTriggered) {
+            Promise.resolve().then(async () => {
             let alignMsg = null, alignType = 'info';
             let finished = false;
             // Safety net: if align does not finish within ~12s, emit an error toast
@@ -497,7 +568,7 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
             }, 12000);
             try {
               const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-              const ar = await alignSegment(filePath, { version: childV, segment: segHint, neighbors: 1 });
+              const ar = await api.alignSegment(filePath, { version: childV, segment: segHint, neighbors: 1 });
               const t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
               const w = statsCopy.words || 0; const sec = statsCopy.seconds || 0;
               dbg(`[dbg] align:resp ok=${!!(ar&&ar.ok)} changed=${+ar?.changed_count||0} total=${+ar?.total_compared||0}`);
@@ -520,27 +591,52 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
               alignType = 'error';
             }
             try {
-              const aligned = await getTranscriptWords(filePath, childV);
+              const aligned = await api.getTranscriptWords(filePath, childV);
               if (Array.isArray(aligned) && aligned.length) {
+                // Validate timing data before accepting it
+                validateTimingData(aligned);
+                
                 const prevToks = (getState().tokens || []).slice();
                 const enriched = mergeProbabilities(aligned, prevToks);
                 dbg(`[dbg] words:received count=${aligned.length} with_timing=${countWithTimings(aligned)} prev_with_timing=${countWithTimings(prevToks)} prob_before=${aligned.filter(x=>Number.isFinite(x.probability)).length} prob_after=${enriched.filter(x=>Number.isFinite(x.probability)).length}`);
                 store.setTokens(enriched);
                 store.setLiveText(enriched.map(t => t.word || '').join(''));
+                
+                // Only show success if timing data is valid
+                finished = true; try { clearTimeout(fallbackTimer); } catch {}
+                closeAlignToasts();
+                if (alignMsg) { try { showToast(alignMsg, alignType); } catch {} }
+                showToast('השינויים נשמרו בהצלחה', 'success');
+              } else {
+                throw new Error('No aligned data received');
               }
-            } finally {
+            } catch (validationError) {
               finished = true; try { clearTimeout(fallbackTimer); } catch {}
               closeAlignToasts();
-              if (alignMsg) { try { showToast(alignMsg, alignType); } catch {} }
+              dbg('[dbg] timing validation failed:', validationError?.message || validationError);
+              showToast(`שגיאה בנתוני התזמון: ${validationError?.message || 'נתונים לא תקינים'}`, 'error');
+              throw validationError; // Re-throw to prevent success toast
+            } finally {
+              if (!finished) {
+                finished = true; try { clearTimeout(fallbackTimer); } catch {}
+                closeAlignToasts();
+                if (alignMsg) { try { showToast(alignMsg, alignType); } catch {} }
+              }
             }
           });
+          }
         }
       } catch {}
+      
+      // Show success message immediately if no alignment was triggered
+      if (!alignmentTriggered) {
+        showToast('השינויים נשמרו בהצלחה', 'success');
+      }
       try {
         if (typeof childV === 'number' && childV > 1) {
           // Re-fetch the actual parent by version (strongly consistent baseline)
           let parent = null;
-          try { parent = await getTranscriptVersion(filePath, parentV); } catch {}
+          try { parent = await api.getTranscriptVersion(filePath, parentV); } catch {}
           const parentText = canonicalizeText(parent?.text || parentTextSnapshot || '');
           if (parentText) {
           // Optional: save edit ops history via backend if available (handled server-side on save)
@@ -551,7 +647,6 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
       } catch (eHist) {
         console.debug('Edit history save skipped:', eHist?.message || eHist);
       }
-      showToast('השינויים נשמרו בהצלחה', 'success');
       setSaveButton('idle');
       // Verify version chain integrity (v1 + all ops → latest hash)
       try {
@@ -596,9 +691,9 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
           // Wire actions
           const reload = async () => {
             try {
-              const latest = await getLatestTranscript(filePath);
+              const latest = await api.getLatestTranscript(filePath);
               if (!latest) return;
-              const words = await getTranscriptWords(filePath, latest.version);
+              const words = await api.getTranscriptWords(filePath, latest.version);
               const toks = Array.isArray(words) && words.length ? words : tokens;
               store.setTokens(toks);
               store.setLiveText((toks || []).map(t => t.word || '').join(''));
@@ -682,12 +777,14 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
               }
 
               // Build minimal tokens from merged text (server will adjust timings later)
-              const tokensMerged = Array.from(merged).map(ch => ({ word: ch === '\n' ? '\n' : ch, start: 0, end: 0 }));
+              // CRITICAL: Do NOT generate artificial timing data with start: 0, end: 0
+              // If timing data is missing, leave it as null to expose the bug
+              const tokensMerged = Array.from(merged).map(ch => ({ word: ch === '\n' ? '\n' : ch, start: null, end: null }));
 
               // Try saving merged result against latest
               const latest = payload.latest;
-              const expected = await sha256Hex(canonicalizeText(latest?.text || ''));
-              const saveRes = await saveTranscriptVersion(filePath, { parentVersion: latest?.version ?? null, text: merged, words: tokensMerged, expectedBaseSha256: expected });
+              const expected = await api.sha256Hex(canonicalizeText(latest?.text || ''));
+              const saveRes = await api.saveTranscriptVersion(filePath, { parentVersion: latest?.version ?? null, text: merged, words: tokensMerged, expectedBaseSha256: expected });
 
               // Update UI with merged saved
               store.setTokens(tokensMerged);
@@ -713,13 +810,13 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
       }
       // Probe for conflict even if error wasn’t explicitly 409 (e.g., transient DB lock)
       try {
-        const latestProbe = await getLatestTranscript(filePath);
+        const latestProbe = await api.getLatestTranscript(filePath);
         if (latestProbe && Number.isFinite(+st.version) && +latestProbe.version !== +st.version) {
           const parentVer = +st.version || 0;
-          const parent = await getTranscriptVersion(filePath, parentVer);
+          const parent = await api.getTranscriptVersion(filePath, parentVer);
           const parentText = canonicalizeText(parent?.text || st.baselineText || '');
           const latestText = canonicalizeText(latestProbe?.text || '');
-          const baseHash = await sha256Hex(parentText);
+          const baseHash = await api.sha256Hex(parentText);
           const { diffs: d1 } = await workers.diff.send(parentText, latestText, { editCost: 8, timeoutSec: 0.8 });
           const { diffs: d2 } = await workers.diff.send(parentText, text, { editCost: 8, timeoutSec: 0.8 });
           const payload = {
@@ -737,7 +834,7 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
       } catch {}
       console.warn('Versioned save failed:', e1);
       showToast('שמירה נכשלה', 'error');
-    } finally { saving = false; saveQueued = false; setSaveButton('idle'); try { markCorrection(filePath); } catch {}; try { const fileItem = els.files?.querySelector(`[data-file="${file}"]`); if (fileItem) { fileItem.classList.add('has-correction'); fileItem.classList.remove('no-correction'); } } catch {} }
+    } finally { saving = false; saveQueued = false; setSaveButton('idle'); try { api.markCorrection(filePath); } catch {}; try { const fileItem = els.files?.querySelector(`[data-file="${file}"]`); if (fileItem) { fileItem.classList.add('has-correction'); fileItem.classList.remove('no-correction'); } } catch {} }
   }
   function checkQueuedSave() { if (saveQueued && isIdle() && !saving) performSave(); }
   setInterval(checkQueuedSave, 200);

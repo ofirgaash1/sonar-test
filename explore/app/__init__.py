@@ -149,9 +149,10 @@ def create_app(data_dir: str, index_file: str = None):
         root_logger.addHandler(console_handler)
         root_logger.addHandler(file_handler)
 
-    for target_logger in (app.logger, root_logger):
-        if _duplicate_log_filter not in target_logger.filters:
-            target_logger.addFilter(_duplicate_log_filter)
+    # Temporarily disable duplicate filter to see actual errors
+    # for target_logger in (app.logger, root_logger):
+    #     if _duplicate_log_filter not in target_logger.filters:
+    #         target_logger.addFilter(_duplicate_log_filter)
 
     if invalid_duplicate_notice:
         app.logger.warning(

@@ -1,66 +1,122 @@
+# TODO: Files to analyze for README.md
 
-1. I think for some reason we send alignment request to the endpoint twice:
+## Python Files (31 files)
+- DONE explore/app/routes/transcripts.py
+- DONE explore/app/transcripts/alignment.py
+- DONE explore/app/transcripts/db_ops.py
+- DONE explore/run.py
+- DONE explore/app/routes/export.py
+- DONE explore/app/transcripts/timing.py
+- DONE explore/app/transcripts/utils.py
+- check_backend_logs.py
+- DONE explore/app/__init__.py
+- DONE explore/app/transcripts/text_ops.py
+- explore/app/routes/_helpers.py
+- DONE explore/app/transcripts/schema.py
+- DONE explore/app/transcripts/__init__.py
+- explore/app/routes/testing.py
+- DONE explore/app/services/db.py
+- DONE explore/app/routes/audio.py
+- DONE explore/app/routes/search.py
+- DONE explore/__init__.py
+- DONE explore/app/utils.py
+- DONE explore/app.py
+- DONE explore/wsgi.py
+- explore/app/routes/browser.py
+- DONE explore/app/routes/auth.py
+- explore/app/cli.py
+- DONE explore/app/services/search.py
+- DONE explore/app/services/index.py
+- DONE explore/app/services/export_service.py
+- DONE explore/app/services/analytics_service.py
+- DONE explore/app/services/__init__.py
+- DONE explore/app/routes/main.py
+- explore/app/routes/frontend.py
 
-[toast] טוען פרק...
-toast.js:8 [toast] מיישר תזמונים: 0 מילים, 0.0 שניות — נשלח…
-toast.js:8 [toast] מיישר תזמונים: 10 מילים, 5.5 שניות — נשלח…
-toast.js:8 [toast:success] מיישר תזמונים: 10 מילים, 5.5 שניות — עודכנו 10 — 19.1s
-toast.js:8 [toast:success] השינויים נשמרו בהצלחה
-toast.js:8 [toast:success] אימות גרסה הצליח (hash 0548d1e3)
+## JavaScript Files (30 files)
+- DONE v2/ui/controls.js
+- DONE v2/main.js
+- DONE v2/editor/pipeline.js
+- DONE v2/data/api.js
+- DONE v2/history/verify-chain.js
+- DONE v2/data/words-pager.js
+- DONE v2/history/panel.js
+- DONE v2/data/browser.js
+- DONE v2/workers/diff-worker.js
+- DONE v2/workers/diff-core.js
+- DONE v2/ui/layout.js
+- DONE v2/history/show-layers.js
+- DONE v2/ui/toast.js
+- workers/diff-core.js
+- workers/align-worker.js
+- DONE v2/workers/init.js
+- DONE v2/ui/theme.js
+- DONE v2/ui/merge-modal.js
+- DONE v2/ui/hud.js
+- v2/shared/protocol.js
+- DONE v2/shared/canonical.js
+- DONE v2/render/virtualizer.js
+- DONE v2/render/overlay.js
+- DONE v2/render/diff-panel.js
+- DONE v2/player/sync.js
+- DONE v2/player/karaoke.js
+- DONE v2/history/layers-view.js
+- DONE v2/data/search.js
+- DONE v2/core/state.js
+- DONE explore/app/static/js/results.js
 
-here is the server log:
-2025-09-16 05:15:36,679 | INFO | 127.0.0.1 - - [16/Sep/2025 05:15:36] "GET /audio/אבות%20האומה/2024.05.09%20%231%20כללים%20במקום%20חוקים.opus HTTP/1.1" 206 -
-2025-09-16 05:15:36,937 | INFO | [TIMING] [REQ:fae498d3] Audio request received for: אבות האומה/2024.05.09 #1 כללים במקום חוקים.opus
-2025-09-16 05:15:36,938 | INFO | [TIMING] [REQ:fae498d3] filename.repr='אבות האומה/2024.05.09 #1 כללים במקום חוקים.opus'
-2025-09-16 05:15:36,938 | INFO | [TIMING] [REQ:fae498d3] recovered_from_uri_variants=["'אבות האומה/2024.05.09 #1 כללים במקום חוקים.opus'", "'אבות האומה/2024.05.09 #1 כללים במקום חוקים.opus'", "'אבות האומה/2024.05.09 #1 כללים במקום חוקים.opus'", "'×\\x90×\\x91×\\x95×ª ×\\x94×\\x90×\\x95×\\x9e×\\x94/2024.05.09 #1 ×\\x9b×\\x9c×\\x9c×\\x99×\\x9d ×\\x91×\\x9e×§×\\x95×\\x9d ×\\x97×\\x95×§×\\x99×\\x9d.opus'"]
-2025-09-16 05:15:36,939 | INFO | [TIMING] [REQ:fae498d3] latin1->utf8 candidate=' /2024.05.09 #1   .opus'
-2025-09-16 05:15:36,940 | INFO | [TIMING] [REQ:fae498d3] Streaming local audio: C:\Users\Ofir Gaash\Desktop\facebook\sonar-test\audio\blobs\1bad097c3469b425431fa6ea786784353da9b25cbefd36cf06cdfc83dc17b7b6
-2025-09-16 05:15:36,941 | INFO | [TIMING] [REQ:fae498d3] audio_path.repr='C:\\Users\\Ofir Gaash\\Desktop\\facebook\\sonar-test\\audio\\blobs\\1bad097c3469b425431fa6ea786784353da9b25cbefd36cf06cdfc83dc17b7b6'
-2025-09-16 05:15:36,941 | INFO | [TIMING] [REQ:fae498d3] Starting to send file: C:\Users\Ofir Gaash\Desktop\facebook\sonar-test\audio\blobs\1bad097c3469b425431fa6ea786784353da9b25cbefd36cf06cdfc83dc17b7b6
-2025-09-16 05:15:36,944 | INFO | [TIMING] [REQ:fae498d3] Range file served in 2.20ms
-2025-09-16 05:15:36,945 | INFO | [TIMING] [REQ:fae498d3] Serving range request: bytes 1998848-14798306/14798307
-2025-09-16 05:15:36,946 | INFO | 127.0.0.1 - - [16/Sep/2025 05:15:36] "GET /audio/אבות%20האומה/2024.05.09%20%231%20כללים%20במקום%20חוקים.opus HTTP/1.1" 206 -
-2025-09-16 05:15:37,233 | INFO | 127.0.0.1 - - [16/Sep/2025 05:15:37] "GET /favicon.ico HTTP/1.1" 404 -
-2025-09-16 05:16:09,895 | INFO | 127.0.0.1 - - [16/Sep/2025 05:16:09] "GET /episode?folder=אבות%20האומה&file=2024.05.09%20%231%20כללים%20במקום%20חוקים.opus HTTP/1.1" 200 -
-2025-09-16 05:16:10,035 | INFO | 127.0.0.1 - - [16/Sep/2025 05:16:10] "GET /transcripts/history?doc=אבות%20האומה%2F2024.05.09%20%231%20כללים%20במקום%20חוקים.opus HTTP/1.1" 200 -
-2025-09-16 05:16:10,387 | INFO | 127.0.0.1 - - [16/Sep/2025 05:16:10] "GET /transcripts/get?doc=אבות%20האומה%2F2024.05.09%20%231%20כללים%20במקום%20חוקים.opus&version=1 HTTP/1.1" 200 -
-2025-09-16 05:16:10,622 | INFO | 127.0.0.1 - - [16/Sep/2025 05:16:10] "GET /transcripts/edits?doc=אבות%20האומה%2F2024.05.09%20%231%20כללים%20במקום%20חוקים.opus HTTP/1.1" 200 -
+## TypeScript Files (3 files)
+- e2e/editor.spec.ts
+- playwright.config.ts
+- e2e/save.spec.ts
 
+## Shell Scripts (2 files)
+- dev.sh
+- explore/start.sh
 
-2. look at the weird timings in the "השוואה" tab in the diff card:
+## Batch Files (1 file)
+- open-v2.cmd
 
-שכבות שינויים עבור אבות האומה/2024.05.09 #1 כללים במקום חוקים.opus 
-מאת dev@ivrit.ai
-— v0 → v1
-איל,אין,
-⏱ שינויים בתזמונים (קטעים 0–1)
-נדב · start 3.280→3.963 (+0.683), end 3.960→4.043 (+0.083)
-אבקסיס · start 3.960→6.692 (+2.732), end 4.460→8.358 (+3.898)
-ואריאל · start 4.460→8.559 (+4.099), end 4.920→8.780 (+3.860)
-שנאבל · start 4.920→8.780 (+3.860), end 5.260→8.980 (+3.720)
-עם · start 5.260→8.780 (+3.520), end 5.700→8.980 (+3.280)
-אבות · start 5.700→8.780 (+3.080), end 6.960→8.980 (+2.020)
-האומה · start 6.960→8.780 (+1.820), end 7.280→8.980 (+1.700)
-מבית · start 8.240→8.780 (+0.540), end 8.420→8.980 (+0.560)
-אול · start 8.480→8.780 (+0.300), end 8.640→8.980 (+0.340)
-איל, · start 8.640→8.780 (+0.140), end 8.820→8.980 (+0.160)
+## Configuration Files
+- package.json
+- package-lock.json
+- requirements-dev.txt
+- explore/requirements.txt
+- explore/app/services/requirements.txt
+- docker-compose.yml
+- Dockerfile
+- playwright.config.ts
 
-what can cause this weird behaviour (almost all the words are suddenly changed drastically 8.780-8.980)
+## Other Important Files
+- explore/routes.txt
+- backend_log_errors.json
+- explore/index.html
+- v2/index.html
+- v2/index_copy.html
+- v2/styles.css
 
-we need to investigate the exact alignment algorithm...
+## HTML Templates (7 files)
+- explore/app/templates/*.html
 
-3. I want us to log the exact response from the alignment endpoint (silence-remover.com)
-and save the cut audio in an 'audio-log' folder instead of throwing that away...
+## CSS Files (4 files)
+- explore/app/static/css/login.css
+- explore/app/static/css/results.css
+- explore/app/static/css/style.css
+- v2/styles.css
 
-   - [DONE] Backend now saves cut WAV and raw JSON response under `audio-log/` (or `AUDIO_LOG_DIR`).
-   - [DONE] Applies to both pre-align (save) and manual align_segment.
-   - Artifacts include doc, seg, timestamps, and clip window in filenames.
+## Test Files
+- tests/conftest.py
+- tests/js/diff_determinism.mjs
+- tests/test_diff_core_node.py
+- tests/test_exports.py
+- tests/test_transcripts_api.py
+- tests/test_transcripts_save.py
 
+## Database Files
+- explore.sqlite
+- explore.sqlite-shm
+- explore.sqlite-wal
 
-4. it seems like after a successful alignment, the corrections are dropped/reverted to initial state in the transcript card (but not in the diff card where you can see the actual fixes, which means the data )
-
-5. the goal is to have automated tests - no manual clicks, full coverage
-
-6. Avoid duplicate alignment calls
-   - [NEW] Added config `ALIGN_PREALIGN_ON_SAVE` (default: true). Set to false to disable pre-align during save to prevent duplicate calls when UI also triggers `align_segment`.
-   - Investigate UI flow to ensure only one alignment pathway is invoked.
+## Log Files
+- app.log
+- audio-log

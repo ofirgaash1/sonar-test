@@ -45,8 +45,10 @@ export function setupEditorPipeline(els, { workers, virtualizer, getDocKey, edit
     const out = [];
     const s = String(str || '');
     for (const ch of s) {
-      if (ch === '\n') { out.push({ word: '\n', start: 0, end: 0, probability: null }); }
-      else { out.push({ word: ch, start: 0, end: 0, probability: null }); }
+      // CRITICAL: Do NOT generate artificial timing data with start: 0, end: 0
+      // If timing data is missing, leave it as null to expose the bug
+      if (ch === '\n') { out.push({ word: '\n', start: null, end: null, probability: null }); }
+      else { out.push({ word: ch, start: null, end: null, probability: null }); }
     }
     return out;
   }
@@ -61,9 +63,11 @@ export function setupEditorPipeline(els, { workers, virtualizer, getDocKey, edit
       const hasTiming = (arr) => {
         if (!Array.isArray(arr)) return false;
         for (const t of arr) {
-          const s = (t && Number.isFinite(t.start)) ? +t.start : 0;
-          const e = (t && Number.isFinite(t.end)) ? +t.end : 0;
-          if (s > 0 || e > 0) return true;
+        // CRITICAL: Do NOT generate artificial timing data by defaulting to 0
+        // If timing data is missing, leave it as null to expose the bug
+        const s = (t && Number.isFinite(t.start)) ? +t.start : null;
+        const e = (t && Number.isFinite(t.end)) ? +t.end : null;
+          if (s != null && s > 0 || e != null && e > 0) return true;
         }
         return false;
       };

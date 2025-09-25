@@ -3,10 +3,14 @@ import logging
 import os
 import re
 from typing import Optional
+from collections import defaultdict
 
 from flask import abort
 
 logger = logging.getLogger("app.routes.transcripts")
+
+# Log deduplication - track repeated messages to avoid spam
+_log_counts = defaultdict(int)
 
 
 def sha256_hex(value: str) -> str:
@@ -27,13 +31,31 @@ def clamp_neighbors(value: int) -> int:
     return n_val
 
 
-def log_info(message: str, data: Optional[dict] = None) -> None:
-    """Thin wrapper around logger.info that never raises."""
+def log_info(message: str, data: Optional[dict] = None, dedupe: bool = False) -> None:
+    """Thin wrapper around logger.info that never raises.
+    
+    Args:
+        message: The log message
+        data: Optional extra data to include
+        dedupe: If True, deduplicate repeated messages by adding count suffix
+    """
     try:
+        if dedupe:
+            # Track repeated messages and add count suffix
+            _log_counts[message] += 1
+            count = _log_counts[message]
+            if count > 1:
+                message = f"{message} ({count}x)"
+        
+        # Add timestamp to log message
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamped_message = f"[{timestamp}] {message}"
+        
         if data:
-            logger.info(message, extra={"data": data})
+            logger.info(timestamped_message, extra={"data": data})
         else:
-            logger.info(message)
+            logger.info(timestamped_message)
     except Exception:
         pass
 

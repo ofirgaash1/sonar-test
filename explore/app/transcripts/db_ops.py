@@ -82,6 +82,20 @@ def fetch_words_rows(db: DatabaseService, doc: str, version: int, start_seg: int
 
 
 def normalize_end_times(db: DatabaseService, doc: str, version: int, min_dur: float = 0.20) -> int:
+    """
+    CRITICAL WARNING: This function should NOT generate artificial timing data!
+    
+    If timing data is missing or invalid, we should:
+    1. Leave it as NULL/None to indicate missing data
+    2. FAIL the save operation to expose the bug
+    3. Fix the root cause of the timing data issue
+    
+    DO NOT use "min_dur" or other artificial timing generation techniques.
+    This masks bugs and prevents proper debugging of timing data issues.
+    
+    The min_dur parameter should only be used for very specific edge cases
+    where we have confirmed valid timing data but need to adjust for precision.
+    """
     cur = db.execute(
         """
         SELECT segment_index, word_index, start_time, end_time
@@ -102,7 +116,9 @@ def normalize_end_times(db: DatabaseService, doc: str, version: int, min_dur: fl
         for idx, (wi, s_raw, e_raw) in enumerate(items):
             if s_raw is None and e_raw is None:
                 continue
-            start = s_raw if s_raw is not None else (prev_end if prev_end is not None else 0.0)
+            # CRITICAL: Do NOT generate artificial timing data by defaulting to 0.0 or adding min_dur
+            # If timing data is missing, leave it as None to expose the bug
+            start = s_raw if s_raw is not None else (prev_end if prev_end is not None else None)
             if prev_end is not None and start is not None and start < prev_end:
                 start = prev_end
             next_start = None
@@ -113,13 +129,29 @@ def normalize_end_times(db: DatabaseService, doc: str, version: int, min_dur: fl
             if e_raw is not None and start is not None and e_raw > start:
                 end = e_raw
             else:
-                end = next_start if next_start is not None else ((start or 0.0) + float(min_dur))
+                # CRITICAL: Do NOT generate artificial timing data by adding min_dur
+                # If timing data is missing, leave it as None to expose the bug
+                end = next_start if next_start is not None else None
+            # CRITICAL: Only fix monotonicity if we have valid timing data
+            # DO NOT generate artificial timing data - this masks bugs!
+            # If timing data is invalid, we should fail the operation to expose the bug
+            if start is not None and end is not None and end < start:
+                # This should only happen in very specific edge cases with confirmed valid data
+                # If this happens frequently, it indicates a bug in the timing assignment logic
+                utils.log_warning(f"[TIMING] Monotonicity violation detected for {doc} v{version}: start={start}, end={end}")
+                end = start + float(min_dur)
             prev_end = end
             need_update = (
                 s_raw is None or e_raw is None or end != e_raw or (start is not None and prev_end is not None and start < prev_end)
             )
             if need_update:
-                updated.append((float(start or 0.0), float(end), doc, int(version), int(wi)))
+                # CRITICAL: Do NOT generate artificial timing data by defaulting to 0.0
+                # If timing data is missing, leave it as None to expose the bug
+                start_val = float(start) if start is not None else None
+                end_val = float(end) if end is not None else None
+                # Only update if we have valid timing data
+                if start_val is not None and end_val is not None:
+                    updated.append((start_val, end_val, doc, int(version), int(wi)))
     if updated:
         db.batch_execute(
             "UPDATE transcript_words SET start_time=?, end_time=? WHERE file_path=? AND version=? AND word_index=?",
@@ -139,30 +171,41 @@ def normalize_db_words_rows(rows):
         nonlocal out, with_timing
         n = len(segment_tokens)
         for token in segment_tokens:
+            # CRITICAL: Do NOT generate artificial timing data by defaulting to 0.0
+            # If timing data is missing, leave it as None to expose the bug
             try:
-                token['start'] = float(token.get('start') or 0.0)
+                token['start'] = float(token.get('start')) if token.get('start') is not None else None
             except Exception:
-                token['start'] = 0.0
+                token['start'] = None
             try:
-                token['end'] = float(token.get('end') if token.get('end') is not None else token['start'])
+                token['end'] = float(token.get('end')) if token.get('end') is not None else None
             except Exception:
-                token['end'] = float(token['start'])
+                token['end'] = None
         for i in range(n):
-            s_val = float(segment_tokens[i].get('start') or 0.0)
-            e_val = float(segment_tokens[i].get('end') or 0.0)
-            if not (e_val > s_val):
-                next_s = None
-                for future in range(i + 1, n):
-                    ns = float(segment_tokens[future].get('start') or 0.0)
-                    if ns > s_val:
-                        next_s = ns
-                        break
-                if next_s is not None:
-                    e_val = next_s
-                else:
-                    e_val = s_val + MIN_DUR
-                segment_tokens[i]['end'] = e_val
-            if (s_val > 0) or (e_val > 0):
+            s_val = segment_tokens[i].get('start')
+            e_val = segment_tokens[i].get('end')
+            
+            # Only process timing data if we have valid start and end times
+            if s_val is not None and e_val is not None:
+                s_float = float(s_val)
+                e_float = float(e_val)
+                if not (e_float > s_float):
+                    # Try to fix non-monotonic timing by finding next valid start time
+                    next_s = None
+                    for future in range(i + 1, n):
+                        ns = segment_tokens[future].get('start')
+                        if ns is not None and float(ns) > s_float:
+                            next_s = float(ns)
+                            break
+                    if next_s is not None:
+                        segment_tokens[i]['end'] = next_s
+                    # If we can't fix it, leave as None to expose the bug
+                
+                # Count words with valid timing data
+                if (s_float > 0) or (e_float > 0):
+                    with_timing += 1
+            elif s_val is not None or e_val is not None:
+                # Partial timing data - count it but don't modify
                 with_timing += 1
         out.extend(segment_tokens)
 
@@ -171,15 +214,17 @@ def normalize_db_words_rows(rows):
             if buffer:
                 flush(buffer)
                 buffer = []
+            # CRITICAL: Do NOT generate artificial timing data by defaulting to 0.0
+            # If timing data is missing, leave it as None to expose the bug
             try:
-                prev_end = out[-1]['end'] if out else 0.0
+                prev_end = out[-1]['end'] if out else None
             except Exception:
-                prev_end = 0.0
+                prev_end = None
             out.append({"word": "\n", "start": prev_end, "end": prev_end, "probability": None})
         buffer.append({
             "word": word,
-            "start": st if st is not None else 0.0,
-            "end": en if en is not None else None,
+            "start": st,  # Do NOT default to 0.0 - leave as None to expose missing timing data
+            "end": en,
             "probability": float(pr) if pr is not None else None,
         })
         current_segment = seg
@@ -201,15 +246,15 @@ def slice_words_json(words: list, seg: int, end_seg: int) -> list:
                 break
             cur_seg += 1
             if started and cur_seg <= end_seg:
-                out.append({"word": "\n", "start": token.get('start') or 0.0, "end": token.get('start') or 0.0, "probability": None})
+                out.append({"word": "\n", "start": token.get('start'), "end": token.get('end'), "probability": None})
             continue
         if cur_seg < seg:
             continue
         started = True
         out.append({
             "word": str(token.get('word') or ''),
-            "start": float(token.get('start') or 0.0),
-            "end": float(token.get('end') if token.get('end') is not None else (token.get('start') or 0.0)),
+            "start": float(token.get('start')) if token.get('start') is not None else None,
+            "end": float(token.get('end')) if token.get('end') is not None else None,
             "probability": (float(token.get('probability')) if (token.get('probability') not in (None, '')) else None),
         })
     return out
@@ -217,7 +262,8 @@ def slice_words_json(words: list, seg: int, end_seg: int) -> list:
 
 def normalize_words_json_all(words: list) -> list:
     out = []
-    prev_end = 0.0
+    # CRITICAL: Do NOT initialize prev_end to 0.0 - this generates artificial timing data
+    prev_end = None
     for token in words or []:
         if not token:
             continue
@@ -226,22 +272,26 @@ def normalize_words_json_all(words: list) -> list:
         except Exception:
             word_val = ''
         if word_val == '\n':
+            # CRITICAL: Do NOT generate artificial timing data by defaulting to prev_end
+            # If timing data is missing, leave it as None to expose the bug
             out.append({"word": "\n", "start": prev_end, "end": prev_end, "probability": None})
             continue
-        try:
-            start = float(token.get('start') or 0.0)
-        except Exception:
-            start = 0.0
-        try:
-            end = float(token.get('end') if token.get('end') is not None else start)
-        except Exception:
-            end = start
+        # CRITICAL: Do NOT generate artificial timing data by defaulting to 0.0
+        # If timing data is missing, leave it as None to expose the bug
+        start_val = token.get('start')
+        start = float(start_val) if start_val is not None else None
+        # CRITICAL: Do NOT generate artificial timing data by defaulting to start
+        # If timing data is missing, leave it as None to expose the bug
+        end_val = token.get('end')
+        end = float(end_val) if end_val is not None else None
         try:
             prob = (float(token.get('probability')) if (token.get('probability') not in (None, '')) else None)
         except Exception:
             prob = None
         out.append({"word": word_val, "start": start, "end": end, "probability": prob})
-        prev_end = end
+        # Only update prev_end if we have valid timing data
+        if end is not None:
+            prev_end = end
     return out
 
 

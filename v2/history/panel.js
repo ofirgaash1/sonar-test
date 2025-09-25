@@ -1,7 +1,7 @@
 // v2/history/panel.js
 // Minimal history sidebar: lists versions and previews diffs against current
 
-import { api } from '../data/api.js';
+import api from '../data/api.js';
 import { getState } from '../core/state.js';
 
 function el(id) { return document.getElementById(id); }

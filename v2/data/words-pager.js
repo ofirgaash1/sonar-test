@@ -1,7 +1,7 @@
 // v2/data/words-pager.js
 // Incrementally load words from backend in segment chunks and feed the virtualizer/store
 
-import { api } from './api.js';
+import api from './api.js';
 import { store } from '../core/state.js';
 
 export function setupWordsPager(els, virtualizer, { chunkSegs = 50 } = {}) {

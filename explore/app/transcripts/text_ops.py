@@ -85,6 +85,7 @@ def tokenize_text_to_words(text: str) -> list:
     words = []
     lines = (text or '').splitlines()
     for idx, line in enumerate(lines):
+        start_pos = 0
         buffer = ''
         is_space: Optional[bool] = None
         for char in line:
@@ -96,38 +97,108 @@ def tokenize_text_to_words(text: str) -> list:
                 buffer += char
             else:
                 if buffer:
-                    words.append({'word': buffer})
+                    # Maintain word positions for better timing tracking
+                    words.append({
+                        'word': buffer,
+                        '_position': start_pos
+                    })
                 buffer = char
                 is_space = char_is_space
+                start_pos += len(buffer)
         if buffer:
-            words.append({'word': buffer})
+            words.append({
+                'word': buffer,
+                '_position': start_pos
+            })
         if idx < len(lines) - 1:
-            words.append({'word': '\n'})
+            words.append({'word': '\n', '_position': len(line)})
     if text and text.endswith('\n') and (not words or words[-1].get('word') != '\n'):
         words.append({'word': '\n'})
     return words
 
 
 def carry_over_token_timings(old_words: list, new_words: list) -> list:
+    import logging
+    logger = logging.getLogger(__name__)
+    
     if not old_words or not new_words:
+        logger.info("[TIMING] No words to process")
         return new_words
-    old_tokens = [w.get('word', '') for w in old_words]
-    new_tokens = [w.get('word', '') for w in new_words]
-    matcher = difflib.SequenceMatcher(a=old_tokens, b=new_tokens, autojunk=False)
-    enriched = [dict(w) for w in new_words]
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag != 'equal':
+
+    # Create a mapping of word text to timing data from old words
+    # Maps both stripped and unstripped forms for flexibility
+    timing_map = {}
+    logger.info(f"[TIMING] Processing {len(old_words)} old words")
+    for w in old_words:
+        word = str(w.get('word', ''))
+        if not word:
             continue
-        for offset in range(i2 - i1):
-            old_idx = i1 + offset
-            new_idx = j1 + offset
-            old_word = old_words[old_idx]
-            if old_word.get('start') is not None:
-                enriched[new_idx]['start'] = old_word['start']
-            if old_word.get('end') is not None:
-                enriched[new_idx]['end'] = old_word['end']
-            if old_word.get('probability') is not None:
-                enriched[new_idx]['probability'] = old_word['probability']
+        timing_data = {}
+        if w.get('start') is not None:
+            timing_data['start'] = w['start']
+        if w.get('end') is not None:
+            timing_data['end'] = w['end']
+        if w.get('probability') is not None:
+            timing_data['probability'] = w['probability']
+        if timing_data:
+            logger.info(f"[TIMING] Found timing data for '{word}': {timing_data}")
+            timing_map[word] = timing_data  # Preserve original form with whitespace
+            stripped = word.strip()
+            if stripped and stripped != word:
+                timing_map[stripped] = timing_data  # Also map stripped version
+
+    # Apply timing data to new words when text matches
+    enriched = []
+    logger.info(f"[TIMING] Processing {len(new_words)} new words")
+    
+    # First pass: collect position information
+    total_length = sum(len(str(w.get('word', ''))) for w in new_words)
+    position_map = {}
+    curr_pos = 0
+    for w in new_words:
+        word = str(w.get('word', ''))
+        position_map[curr_pos] = word
+        curr_pos += len(word)
+    
+    # Second pass: match words with timing data
+    for w in new_words:
+        new_token = dict(w)
+        word = str(w.get('word', ''))
+        pos = w.get('_position', 0)
+        
+        # Try matching based on position first
+        matched = False
+        if word in timing_map:
+            # Try exact match first (preserves whitespace)
+            timing_data = timing_map[word]
+            logger.info(f"[TIMING] Found exact match for '{word}'")
+            matched = True
+        elif word.strip() in timing_map:
+            # Fallback to stripped version
+            timing_data = timing_map[word.strip()]
+            logger.info(f"[TIMING] Found stripped match for '{word}'")
+            matched = True
+            
+        if not matched:
+            # No match found - try to find closest word by position
+            logger.info(f"[TIMING] No direct match for '{word}', checking position {pos}/{total_length}")
+            closest_pos = min(position_map.keys(), key=lambda x: abs(x - pos))
+            closest_word = position_map[closest_pos]
+            if closest_word in timing_map:
+                timing_data = timing_map[closest_word]
+                logger.info(f"[TIMING] Found position-based match: '{word}' ≈ '{closest_word}'")
+                matched = True
+            else:
+                logger.info(f"[TIMING] No timing data found for '{word}'")
+                enriched.append(new_token)
+                continue
+            
+        # Carry over timing data
+        for key, value in timing_data.items():
+            new_token[key] = value
+        logger.info(f"[TIMING] Applied timing data to '{word}': {new_token}")
+        enriched.append(new_token)
+
     return enriched
 
 

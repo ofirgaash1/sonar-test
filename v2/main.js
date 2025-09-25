@@ -221,8 +221,10 @@ try {
     const toks = new Array(count);
     for (let i = 0; i < count; i++) {
       // alternate characters and line breaks sparsely
-      if ((i % 1019) === 1018) toks[i] = { word: '\n', start: 0, end: 0 };
-      else toks[i] = { word: 'א', start: 0, end: 0, probability: Math.random() < 0.1 ? 0.7 : 0.99 };
+      // CRITICAL: Do NOT generate artificial timing data with start: 0, end: 0
+      // If timing data is missing, leave it as null to expose the bug
+      if ((i % 1019) === 1018) toks[i] = { word: '\n', start: null, end: null };
+      else toks[i] = { word: 'א', start: null, end: null, probability: Math.random() < 0.1 ? 0.7 : 0.99 };
     }
     store.setTokens(toks);
     const text = toks.map(t => t.word).join('');

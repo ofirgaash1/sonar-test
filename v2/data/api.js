@@ -2,14 +2,23 @@
 // Data access + normalization (HF baseline + optional Supabase corrections).
 // Zero UI here—just fetch, normalize, and hand back clean structures.
 
-// ---- Optional Supabase client (pass from your app) ----
-let supa = null;
-let correctionsCache = new Set();
+// CryptoJS is loaded from CDN in index.html
+/* global CryptoJS */ // Tell ESLint that CryptoJS is a global
+
+// Supabase code removed - no longer used
 // Optional backend base URL detection (for local dev over file://)
 let RUNTIME_BASE = '';
-function setRuntimeBase(b) { try { if (b) { RUNTIME_BASE = String(b); if (typeof window !== 'undefined') window.EXPLORE_API_BASE = RUNTIME_BASE; } } catch {}
+
+export function setRuntimeBase(b) { 
+  try { 
+    if (b) { 
+      RUNTIME_BASE = String(b); 
+      if (typeof window !== 'undefined') window.EXPLORE_API_BASE = RUNTIME_BASE; 
+    } 
+  } catch {}
 }
-function getBackendBase() {
+
+export function getBackendBase() {
   try {
     if (RUNTIME_BASE) return RUNTIME_BASE;
     if (typeof window !== 'undefined' && window.EXPLORE_API_BASE) return String(window.EXPLORE_API_BASE);
@@ -39,53 +48,15 @@ async function fetchBackend(url, init = {}) {
   return r;
 }
 
-/**
- * Configure Supabase. Call once from app bootstrap:
- *   import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
- *   api.configureSupabase(createClient(SUPABASE_URL, ANON_KEY));
- */
-export function configureSupabase(client) {
-  supa = client || null;
-  if (supa) {
-    loadAllCorrections();
-  }
-}
+// Supabase configuration removed - no longer used
+
+// Supabase corrections loading removed - no longer used
 
 /**
- * Load all corrections from Supabase to cache
- */
-async function loadAllCorrections() {
-  if (!supa) return;
-  
-  try {
-    const [corr, ver] = await Promise.all([
-      supa.from('corrections').select('file_path'),
-      // PostgREST null filter syntax
-      supa.from('transcripts').select('file_path').not('version', 'is', null)
-    ]);
-    if (corr.error && corr.status !== 406) {
-      console.error('Corrections query failed:', { status: corr.status, error: corr.error });
-      throw corr.error;
-    }
-    if (ver.error && ver.status !== 406) {
-      console.error('Transcripts query failed:', { status: ver.status, error: ver.error });
-      throw ver.error;
-    }
-    const set = new Set();
-    (corr.data || []).forEach(r => set.add(r.file_path));
-    (ver.data || []).forEach(r => set.add(r.file_path));
-    correctionsCache = set;
-    console.log('✅ Corrections loaded (union corrections+transcripts):', correctionsCache.size);
-  } catch (e) {
-    console.error('❌ Failed to load corrections (union):', e?.message || e);
-  }
-}
-
-/**
- * Check if a file has corrections
+ * Check if a file has corrections (always returns false since Supabase is removed)
  */
 export function hasCorrection(filePath) {
-  return correctionsCache.has(filePath);
+  return false; // Supabase removed, no corrections available
 }
 
 // ---- Local fallback cache for corrections (per-file) ----
@@ -115,24 +86,16 @@ function normPaths(folder, file) {
 }
 
 // ---- Crypto helpers (SHA-256 hex) ----
-export async function sha256Hex(text) {
-  const s = String(text || '');
+async function sha256Hex(text) {
   try {
-    const subtle = (globalThis.crypto && globalThis.crypto.subtle)
-      ? globalThis.crypto.subtle
-      : (globalThis.msCrypto && globalThis.msCrypto.subtle) || null;
-    if (subtle) {
-      const enc = new TextEncoder();
-      const buf = await subtle.digest('SHA-256', enc.encode(s));
-      const bytes = new Uint8Array(buf);
-      return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-    }
+    const s = String(text || '');
+    // Use CryptoJS.SHA256 directly instead of .create()
+    const hash = CryptoJS.SHA256(s);
+    return hash.toString(CryptoJS.enc.Hex);
   } catch (e) {
-    // fall through to JS fallback
-    try { console.warn('sha256 subtle failed:', e?.message || e); } catch {}
+    console.error('sha256Hex error:', e?.message || e);
+    return ''; // Fallback to empty hash to avoid breaking save
   }
-  // Fallback: pure JS SHA-256 (works under file:// and older browsers)
-  try { return sha256HexFallback(s); } catch (e2) { try { console.warn('sha256 fallback failed:', e2?.message || e2); } catch {}; return ''; }
 }
 
 // Minimal SHA-256 implementation (public domain style)
@@ -267,14 +230,18 @@ function normalizeTranscript(raw) {
     if (!Array.isArray(s.words) || !s.words.length) {
       s.words = [{
         word: s.text || ' ',
-        start: +s.start || 0,
-        end: +s.end || (+s.start || 0) + 0.5,
+        // CRITICAL: Do NOT generate artificial timing data by defaulting to 0 or start+0.5
+        // If timing data is missing, leave it as null to expose the bug
+        start: Number.isFinite(+s.start) ? +s.start : null,
+        end: Number.isFinite(+s.end) ? +s.end : null,
         probability: Number.isFinite(+s.probability) ? +s.probability : undefined
       }];
     } else {
       s.words.forEach((w) => {
-        w.start = +w.start || 0;
-        w.end = +w.end || (w.start + 0.25);
+        // CRITICAL: Do NOT generate artificial timing data by defaulting to 0 or start+0.25
+        // If timing data is missing, leave it as null to expose the bug
+        w.start = Number.isFinite(+w.start) ? +w.start : null;
+        w.end = Number.isFinite(+w.end) ? +w.end : null;
         w.word = String(w.word || '');
         if (w.probability != null) w.probability = Number(w.probability);
       });
@@ -290,13 +257,21 @@ function flattenToTokens(d) {
 
   (d.segments || []).forEach((s, si) => {
     (s.words || []).forEach((w) => {
-      toks.push({
-        word: String(w.word || ''),
-        start: +w.start || 0,
-        end: +w.end || ((+w.start || 0) + 0.25),
-        probability: Number.isFinite(+w.probability) ? +w.probability : NaN
-      });
-      lastEnd = toks[toks.length - 1].end;
+      const word = String(w.word || '');
+      // CRITICAL: Do NOT generate artificial timing data by defaulting to lastEnd or start+0.25
+      // If timing data is missing, leave it as null to expose the bug
+      const start = (w.start != null && w.start !== '') ? +w.start : null;
+      const end = (w.end != null && w.end !== '') ? +w.end : null;
+      const prob = Number.isFinite(+w.probability) ? +w.probability : NaN;
+      toks.push({ word, start, end, probability: prob });
+      // Only update lastEnd if we have valid timing data
+      if (end != null && Number.isFinite(end)) {
+        lastEnd = end;
+      }
+      // Add space token if word has trailing space
+      if (word.match(/\s+$/)) {
+        toks.push({ word: ' ', start: lastEnd, end: lastEnd, probability: NaN });
+      }
     });
     if (si < (d.segments.length - 1)) {
       toks.push({ word: '\n', start: lastEnd, end: lastEnd, probability: NaN });
@@ -312,43 +287,7 @@ function wordsToText(tokens) {
   return s;
 }
 
-// ---- Supabase: corrections (optional) -----------------------------
-async function loadCorrectionFromDB(filePath) {
-  // Prefer local cache first (fast UX + offline)
-  const local = getLocalCorrection(filePath);
-  if (local) return local;
-
-  if (!supa) return null;
-  const { data, error } = await supa
-    .from('corrections')
-    .select('json_data')
-    .eq('file_path', filePath)
-    .maybeSingle();
-
-  if (error) {
-    // Non-fatal: just log and return null
-    console.warn('Supabase corrections fetch failed:', error);
-    return null;
-  }
-  const json = data?.json_data || null;
-  if (json) setLocalCorrection(filePath, json);
-  return json;
-}
-
-/** Upsert correction JSON */
-export async function saveCorrectionToDB(filePath, jsonObj) {
-  if (!supa) throw new Error('Supabase client not configured');
-  const { data, error } = await supa
-    .from('corrections')
-    .upsert({ file_path: filePath, json_data: jsonObj }, { onConflict: 'file_path' })
-    .select()
-    .single();
-
-  if (error) throw error;
-  // Also persist locally for instant reloads/offline
-  setLocalCorrection(filePath, jsonObj);
-  return data;
-}
+// Supabase correction functions removed - no longer used
 
 // ---- Versioned transcripts (optional, if table exists) ------------
 export async function getLatestTranscript(filePath) {
@@ -399,30 +338,34 @@ export async function saveTranscriptVersion(filePath, { parentVersion = null, te
       payload.neighbors = n;
     }
   } catch {}
-  // Retry wrapper to mitigate transient SQLite "database is locked" errors under concurrent access
-  const maxAttempts = 6; // ~0.8–1.2s total with backoff
+  const maxAttempts = 6;
   let attempt = 0;
   let lastErrText = '';
   while (attempt < maxAttempts) {
     attempt++;
-    const r = await fetchBackend(`${base}/transcripts/save`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-    });
-    if (r.ok) {
-      return await r.json();
+    try {
+      const r = await fetchBackend(`${base}/transcripts/save`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+      });
+      if (r.ok) {
+        console.log(`[API] saveTranscriptVersion succeeded on attempt ${attempt} for ${filePath}`);
+        return await r.json();
+      }
+      if (r.status === 409) {
+        let payload = null; try { payload = await r.json(); } catch {}
+        const err = new Error('Conflict'); err.code = 409; err.payload = payload; throw err;
+      }
+      try { lastErrText = await r.text(); } catch { lastErrText = 'save failed'; }
+      const retriable = r.status >= 500 || /database is locked/i.test(lastErrText || '');
+      console.warn(`[API] saveTranscriptVersion attempt ${attempt}/${maxAttempts} failed: ${lastErrText}`);
+      if (!retriable || attempt >= maxAttempts) {
+        throw new Error(lastErrText || 'save failed');
+      }
+      await new Promise(res => setTimeout(res, 50 * attempt));
+    } catch (e) {
+      console.error(`[API] saveTranscriptVersion error on attempt ${attempt}: ${e?.message || e}`);
+      if (attempt >= maxAttempts) throw e;
     }
-    if (r.status === 409) {
-      let payload = null; try { payload = await r.json(); } catch {}
-      const err = new Error('Conflict'); err.code = 409; err.payload = payload; throw err;
-    }
-    // Capture body for diagnostics and retry on lock
-    try { lastErrText = await r.text(); } catch { lastErrText = 'save failed'; }
-    const retriable = r.status >= 500 || /database is locked/i.test(lastErrText || '');
-    if (!retriable || attempt >= maxAttempts) {
-      throw new Error(lastErrText || 'save failed');
-    }
-    // Simple backoff: 50ms, 100ms, 150ms, ...
-    await new Promise(res => setTimeout(res, 50 * attempt));
   }
   throw new Error(lastErrText || 'save failed');
 }
@@ -539,7 +482,7 @@ export async function getAllTranscripts(filePath) {
   } catch { return out; }
 }
 // ---- Edits history (optional) -------------------------------------
-export async function saveTranscriptEdit() { return null; }
+async function saveTranscriptEdit() { return null; }
 
 // ---- Confirmations (anchored to version + hash) --------------------
 export async function getConfirmations(filePath, version) {
@@ -672,8 +615,8 @@ export async function loadEpisode({ folder, file }) {
   };
 }
 
-// Named export bundle (matches earlier import style: `import { api } from ...`)
-export const api = {
+// Bundle all exports
+const api = {
   loadEpisode,
   getLatestTranscript,
   getTranscriptVersion,
@@ -691,13 +634,18 @@ export const api = {
   },
   saveTranscriptVersion,
   getTranscriptEdits,
-  getAllTranscripts,
   saveTranscriptEdit,
   getConfirmations,
   saveConfirmations,
   listFolders,
   listFiles,
   hasCorrection,
+  markCorrection,
+  alignSegment,
+  // configureSupabase removed - no longer used
+  getBackendBase,
+  setRuntimeBase,
   sha256Hex
 };
-export default api;
+export { api as default };
+// All functions are now exported through the api object

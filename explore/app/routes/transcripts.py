@@ -229,6 +229,10 @@ def save_version():
                 # Prefer the first non-null token_ops block
                 if token_ops_block is None and tok_i is not None:
                     token_ops_block = tok_i
+            try:
+                logger.info(f"[ALIGN] prealign mapping: segments={sorted(changed_segments)} updates={len(all_updates)} neighbors={neighbors}")
+            except Exception:
+                pass
         else:
             # Nothing to align
             all_updates = []
@@ -237,13 +241,9 @@ def save_version():
         updates, token_ops_block = [], None
     words, words_json = timing_utils.carry_over_timings_from_db(db, doc, latest, words, _read_transcript_json)
 
-    # Recompose authoritative text from words and canonicalize for storage + hashing
-    try:
-        recomposed_text = text_ops.compose_full_text_from_words(words)
-        store_text = text_ops.canonicalize_text(recomposed_text)
-    except Exception:
-        # Fallback to client-provided text (canonicalized)
-        store_text = text_ops.canonicalize_text(text)
+    # Store canonicalized client text rather than recomposing from tokens
+    # This preserves whitespace exactly as provided by client
+    store_text = text_ops.canonicalize_text(text)
     # Compute child hash from canonicalized text
     new_hash = t_utils.sha256_hex(store_text)
 
@@ -458,11 +458,11 @@ def align_segment():
         return (f'ffmpeg failed: {getattr(e, "stderr", b"\"").decode("utf-8", "ignore")}', 500)
 
     try:
-        align_res = alignment_utils.align_call(wav_bytes, transcript)
+        align_res, request_details = alignment_utils.align_call(wav_bytes, transcript)
         resp_words = (align_res or {}).get('words') or []
         resp_words = alignment_utils.explode_resp_words_if_needed(resp_words)
         try:
-            alignment_utils.save_alignment_artifacts('align', doc, int(seg), ss, to, wav_bytes, align_res, src_audio_path=audio_path)
+            alignment_utils.save_alignment_artifacts('align', doc, int(seg), ss, to, wav_bytes, align_res, transcript, request_details, src_audio_path=audio_path)
         except Exception:
             pass
     except Exception as e:
@@ -487,14 +487,17 @@ def align_segment():
     updates = []  # rows for DB update
     for new_s, new_e, wi in updates_compact:
         ow = by_wi.get(int(wi)) or {}
-        try:
-            old_s = float(ow.get('start') or ow.get('end') or 0.0)
-        except Exception:
-            old_s = 0.0
-        try:
-            old_e = float(ow.get('end') or ow.get('start') or 0.0)
-        except Exception:
-            old_e = old_s
+        # CRITICAL: Do NOT generate artificial timing data by defaulting to 0.0
+        # If timing data is missing, leave it as None to expose the bug
+        start_val = ow.get('start')
+        end_val = ow.get('end')
+        
+        old_s = float(start_val) if start_val is not None else None
+        old_e = float(end_val) if end_val is not None else None
+        
+        # If we don't have end time, don't fall back to start time
+        if old_e is None and old_s is not None:
+            old_e = old_s  # This is legitimate - end can equal start
         word_text = _norm(ow.get('word'))
         seg_idx = int(ow.get('seg') or seg)
         diffs.append({
@@ -513,7 +516,15 @@ def align_segment():
     try:
         nonspace_old = sum(1 for _wi, t, _sg in new_window if _norm(t) != '')
         nonspace_resp = sum(1 for rw in resp_words if _norm((rw or {}).get('word')) != '')
-        logger.info(f"[ALIGN] mapping: old_seq={nonspace_old} resp={nonspace_resp} matched={matched} skipped_text_mismatch=0 diffs={len(diffs)}")
+        logger.info(f"[ALIGN] prealign mapping: old_seq={nonspace_old} resp={nonspace_resp} matched={matched} skipped_text_mismatch=0 diffs={len(diffs)}")
+    except Exception:
+        pass
+    try:
+        logger.info(f"[ALIGN] prealign mapping: matched={matched} diffs={len(diffs)}")
+    except Exception:
+        pass
+    try:
+        print('DEBUG align prealign mapping', matched, len(diffs), flush=True)
     except Exception:
         pass
 
@@ -528,6 +539,23 @@ def align_segment():
             )
             db.commit()
             try:
+                cur = db.execute(
+                    'SELECT COUNT(*), SUM(CASE WHEN start_time IS NOT NULL AND end_time IS NOT NULL AND end_time > start_time THEN 1 ELSE 0 END) FROM transcript_words WHERE file_path=? AND version=?',
+                    [doc, int(version)]
+                )
+                row = cur.fetchone() or [0, 0]
+                total = int(row[0] or 0)
+                with_timings = int(row[1] or 0)
+                t_utils.log_info(
+                    f'[SAVE] persisted tokens: total={total} with_timings={with_timings}',
+                    {
+                        'doc': doc,
+                        'version': int(version),
+                        'segment_start': start_seg,
+                        'segment_end': end_seg,
+                        'updates': updated_count,
+                    },
+                )
             except Exception:
                 pass
         except Exception:
@@ -718,49 +746,53 @@ def history():
 
 @bp.route('/words', methods=['GET'])
 def get_words():
-    doc = request.args.get('doc', '').strip()
-    version = request.args.get('version', '').strip()
-    seg_q = request.args.get('segment', '').strip()
-    count_q = request.args.get('count', '').strip()
-    if not doc or not version.isdigit():
-        abort(400, 'missing ?doc= and/or ?version=')
-    t_utils.ensure_safe_doc(doc)
-    db = _db(); schema_utils.ensure_schema(db)
-    # Build segment filter
-    seg_filter_sql, extra_params, window = db_ops.build_segment_filter(seg_q, count_q, _DEFAULT_SEGMENT_CHUNK)
-    params = [doc, int(version), *extra_params]
+    try:
+        doc = request.args.get('doc', '').strip()
+        version = request.args.get('version', '').strip()
+        seg_q = request.args.get('segment', '').strip()
+        count_q = request.args.get('count', '').strip()
+        if not doc or not version.isdigit():
+            abort(400, 'missing ?doc= and/or ?version=')
+        t_utils.ensure_safe_doc(doc)
+        db = _db(); schema_utils.ensure_schema(db)
+        # Build segment filter
+        seg_filter_sql, extra_params, window = db_ops.build_segment_filter(seg_q, count_q, _DEFAULT_SEGMENT_CHUNK)
+        params = [doc, int(version), *extra_params]
 
-    cur = db.execute(
-        f"""
-        SELECT segment_index, word_index, word, start_time, end_time, probability
-        FROM transcript_words
-        WHERE file_path=? AND version=?{seg_filter_sql}
-        ORDER BY word_index ASC
-        """,
-        params
-    )
-    rows = cur.fetchall() or []
-    if rows:
-        out, with_timing = db_ops.normalize_db_words_rows(rows)
-        try:
-            logger.info(f"[WORDS] doc={doc!r} ver={version} seg_q={seg_q!r} count_q={count_q!r} returned={len(out)} with_timing={with_timing}")
-        except Exception:
-            pass
-        return jsonify(out)
+        cur = db.execute(
+            f"""
+            SELECT segment_index, word_index, word, start_time, end_time, probability
+            FROM transcript_words
+            WHERE file_path=? AND version=?{seg_filter_sql}
+            ORDER BY word_index ASC
+            """,
+            params
+        )
+        rows = cur.fetchall() or []
+        if rows:
+            out, with_timing = db_ops.normalize_db_words_rows(rows)
+            try:
+                logger.info(f"[WORDS] doc={doc!r} ver={version} seg_q={seg_q!r} count_q={count_q!r} returned={len(out)} with_timing={with_timing}")
+            except Exception:
+                pass
+            return jsonify(out)
 
-    # Fallback: use stored JSON words (optionally segment-sliced)
-    row = db_ops.row_for_version(db, doc, int(version))
-    if not row:
-        abort(404, 'version not found')
-    words = row.get('words') or []
-    if seg_filter_sql:
-        # Slice by counting newlines as segment boundaries and preserve newline tokens
-        seg, end_seg = window  # type: ignore
-        out = db_ops.slice_words_json(words, int(seg), int(end_seg))
+        # Fallback: use stored JSON words (optionally segment-sliced)
+        row = db_ops.row_for_version(db, doc, int(version))
+        if not row:
+            abort(404, 'version not found')
+        words = row.get('words') or []
+        if seg_filter_sql:
+            # Slice by counting newlines as segment boundaries and preserve newline tokens
+            seg, end_seg = window  # type: ignore
+            out = db_ops.slice_words_json(words, int(seg), int(end_seg))
+            return jsonify(out)
+        # Normalize entire JSON words list to match DB path shape
+        out = db_ops.normalize_words_json_all(words)
         return jsonify(out)
-    # Normalize entire JSON words list to match DB path shape
-    out = db_ops.normalize_words_json_all(words)
-    return jsonify(out)
+    except Exception as e:
+        logger.error(f"[WORDS] Error in get_words: {e}")
+        raise
 
 
 @bp.route('/confirmations/save', methods=['POST'])
@@ -810,5 +842,3 @@ def save_confirmations():
         raise
 
     return jsonify({"count": len(items)})
-
-

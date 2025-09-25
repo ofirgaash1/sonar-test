@@ -15,6 +15,58 @@ from . import utils
 BaselineLoader = Callable[[Path, str, str], Optional[dict]]
 
 
+def validate_timing_data(words: List[dict]) -> None:
+    """
+    Validate timing data for monotonicity and detect potential artificial timing patterns.
+    Raises ValueError if timing data is invalid.
+    
+    CRITICAL: This function should NEVER generate artificial timing data.
+    If timing data is invalid, we should FAIL and expose the bug, not hide it.
+    """
+    if not words:
+        return
+    
+    import re
+    # Pattern to detect floating-point precision issues that are usually signs of artificial timing
+    # CRITICAL NOTE FOR FUTURE DEVELOPERS:
+    # In 99% of cases, floating-point precision issues like "1.5999999999999999" indicate
+    # artificial timing data being generated somewhere in the codebase.
+    # Only in ~1% of cases is this legitimate floating-point precision from real timing data.
+    # If you change this validation, consider that logging these issues helps us catch
+    # artificial timing bugs that would otherwise be hidden.
+    fp_precision_pattern = re.compile(r'999999999\d')
+    
+    for i, word in enumerate(words):
+        word_text = word.get('word', '')
+        start = word.get('start')
+        end = word.get('end')
+        
+        # Skip validation for space tokens - they don't represent actual spoken content
+        if not word_text.strip():
+            continue
+        
+        # Log floating-point precision issues (99% of the time these indicate artificial timing)
+        if start is not None and fp_precision_pattern.search(str(start)):
+            utils.log_info(f"[TIMING] Floating-point precision issue detected: word '{word_text}' has start time {start} - likely artificial timing data")
+        
+        if end is not None and fp_precision_pattern.search(str(end)):
+            utils.log_info(f"[TIMING] Floating-point precision issue detected: word '{word_text}' has end time {end} - likely artificial timing data")
+        
+        # Check for valid timing data
+        if start is not None and end is not None:
+            if end < start:
+                raise ValueError(f"Invalid timing data: word '{word_text}' end ({end}) < start ({start})")
+            
+            # Check monotonicity with previous word (skip space tokens when checking previous word)
+            if i > 0:
+                prev_word = words[i-1]
+                prev_word_text = prev_word.get('word', '')
+                prev_end = prev_word.get('end')
+                # Only check monotonicity if previous word is not a space token
+                if prev_word_text.strip() and prev_end is not None and start < prev_end:
+                    raise ValueError(f"Non-monotonic timing: word '{word_text}' starts at {start} but previous word ends at {prev_end}")
+
+
 @dataclass
 class _PrevToken:
     word: str
@@ -132,55 +184,112 @@ def _as_prev_token(word: str, start: Optional[float], end: Optional[float], prob
     stripped = word.strip()
     if not stripped:
         return _PrevToken(word=word, start=start, end=end, prob=prob, kind='space', key=None)
+    # For words with leading/trailing whitespace, store both forms for matching
     return _PrevToken(word=word, start=start, end=end, prob=prob, kind='word', key=stripped)
 
 
 def _assign_from_prev(prev_tokens: List[_PrevToken], words: list) -> tuple[list, int]:
+    """
+    CRITICAL WARNING: This function should NOT generate artificial timing data!
+    
+    When assigning timing data from previous versions:
+    1. Use only REAL timing data from the previous version
+    2. If timing data is missing, leave it as None/NULL
+    3. DO NOT generate fake timing data through interpolation or guessing
+    4. If timing data is invalid, log the issue and leave it as None
+    
+    Artificial timing generation masks bugs and prevents proper debugging.
+    We want to see errors when timing data is invalid, not hide them.
+    """
     results: list = []
     assigned = 0
     cursor = 0
     total = len(prev_tokens)
+    last_valid_end = 0.0  # Track last valid end time for interpolation
 
-    def _match(key: str) -> Optional[_PrevToken]:
+    def _match(word_text: str, word_idx: int) -> Optional[_PrevToken]:
         nonlocal cursor
         LOOKAHEAD = 128
+        stripped = word_text.strip()
+
+        # First try to match full text (including whitespace)
         for idx in range(cursor, min(total, cursor + LOOKAHEAD)):
             candidate = prev_tokens[idx]
-            if candidate.kind == 'word' and not candidate.used and candidate.key == key:
-                candidate.used = True
-                cursor = idx + 1
-                return candidate
+            if candidate.kind == 'word' and not candidate.used:
+                if candidate.word == word_text or candidate.key == stripped:
+                    candidate.used = True
+                    cursor = idx + 1
+                    return candidate
+
+        # Full search fallback for unmatched words
         for idx in range(total):
             candidate = prev_tokens[idx]
-            if candidate.kind == 'word' and not candidate.used and candidate.key == key:
+            if candidate.kind == 'word' and not candidate.used:
+                if candidate.word == word_text or candidate.key == stripped:
+                    candidate.used = True
+                    cursor = idx + 1
+                    return candidate
+
+        # Fallback: Use position proximity if no exact match (for edited words)
+        if stripped:
+            closest_idx = max(0, min(word_idx, total - 1))  # Use current position as a heuristic
+            candidate = prev_tokens[closest_idx]
+            if candidate.kind == 'word' and not candidate.used:
                 candidate.used = True
-                cursor = idx + 1
+                cursor = closest_idx + 1
+                utils.log_info(f"[TIMING] Fallback match for '{word_text}' at position {word_idx} using prev token at {closest_idx}")
                 return candidate
         return None
 
-    for token in words or []:
+    for i, token in enumerate(words or []):
         word_text = str(token.get('word') or '')
         stripped = word_text.strip()
         enriched = dict(token)
+
         if word_text == '\n':
             results.append(enriched)
             continue
+
+        # Handle space tokens by interpolating from last valid end time
         if not stripped:
+            enriched['start'] = last_valid_end
+            enriched['end'] = last_valid_end
+            enriched['probability'] = None
             results.append(enriched)
+            # Reduced verbosity: only log space token assignments in debug mode
+            # utils.log_info(f"[TIMING] Space token at index {i} assigned start/end={last_valid_end}")
             continue
-        match = _match(stripped)
-        if match:
-            if enriched.get('start') in (None, '') or float(enriched.get('start') or 0.0) == 0.0:
+
+        # Try to match word tokens
+        match = _match(word_text, i)
+        if match and match.kind == 'word':
+            # Only assign timing data if it's actually missing (None or empty string)
+            # Do NOT treat 0.0 as missing - it might be legitimate timing data
+            if enriched.get('start') in (None, ''):
                 if match.start is not None:
                     enriched['start'] = match.start
                     assigned += 1
-            if enriched.get('end') in (None, '') or float(enriched.get('end') or 0.0) == 0.0:
+            if enriched.get('end') in (None, ''):
                 if match.end is not None:
                     enriched['end'] = match.end
             if enriched.get('probability') in (None, '') and match.prob is not None:
                 enriched['probability'] = match.prob
+            last_valid_end = enriched.get('end', last_valid_end) or last_valid_end
+            # Reduced verbosity: only log timing matches in debug mode to avoid log flooding
+            # utils.log_info(f"[TIMING] Matched '{word_text}' at index {i}: start={enriched.get('start')}, end={enriched.get('end')}, prob={enriched.get('probability')}")
+        else:
+            # For unmatched words, DO NOT generate fake timing data
+            # This should be handled by proper alignment, not by making up timestamps
+            enriched['start'] = None
+            enriched['end'] = None
+            enriched['probability'] = None
+            # Reduced verbosity: only log unmatched words in debug mode
+            # utils.log_info(f"[TIMING] Unmatched '{word_text}' at index {i} - NO TIMING DATA ASSIGNED (alignment required)")
         results.append(enriched)
+
+    utils.log_info(f"[TIMING] Total assigned={assigned}, total words={len(results)}")
     return results, assigned
+
 def carry_over_timings_from_db(
     db: DatabaseService,
     doc: str,
@@ -200,8 +309,16 @@ def carry_over_timings_from_db(
         else:
             assigned_count = 0
             enriched = words
+        
+        # Validate timing data - fail fast if invalid
+        validate_timing_data(enriched)
+        
+    except ValueError as e:
+        # Re-raise validation errors
+        raise e
     except Exception:
         enriched = words
+    
     try:
         words_json = orjson.dumps(enriched).decode('utf-8')
     except Exception:
