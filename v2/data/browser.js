@@ -8,7 +8,7 @@ import { listFolders, listFiles, loadEpisode, hasCorrection, getConfirmations, g
 export function setupBrowser(els, { bumpEditGen } = {}) {
   if (!els?.folders || !els?.files) return;
 
-  let currentFolder = null;
+
   let currentFile = null;
   let lastLoadController = null;
   let loadSeq = 0; // monotonic load sequence to ignore late results
@@ -37,7 +37,7 @@ export function setupBrowser(els, { bumpEditGen } = {}) {
 
   async function loadFiles(folderName) {
     if (!folderName) return;
-    currentFolder = folderName;
+
     currentFile = null;
     try {
       els.files.innerHTML = '<div class="item">טוען...</div>';
@@ -57,9 +57,9 @@ export function setupBrowser(els, { bumpEditGen } = {}) {
       });
       // Auto-open first file for smoother UX/tests (use data we already have)
       try {
-        const first = Array.isArray(files) && files.length ? files[0] : null;
-        if (first && first.name) {
-          const f = String(first.name);
+        const firstName = files[0]?.name;
+        if (firstName) {
+          const f = String(firstName);
           desiredPath = `${folderName}/${f}`;
           // Call loader directly; mark active in DOM if present
           loadEpisodeFile(folderName, f);
@@ -107,7 +107,7 @@ export function setupBrowser(els, { bumpEditGen } = {}) {
     if (!folder || !file) return;
     const myKey = `${folder}/${file}`;
     if (desiredPath && myKey !== desiredPath) return;
-    currentFile = file;
+
     const mySeq = ++loadSeq;
 
     if (bumpEditGen) try { bumpEditGen(); } catch {}
@@ -132,7 +132,7 @@ export function setupBrowser(els, { bumpEditGen } = {}) {
 
       if (els.player) { els.player.src = episode.audioUrl; els.player.load(); }
 
-      const initialText = (episode.initialTokens || []).map(t => t && t.word ? t.word : '').join('');
+      const initialText = (episode.initialTokens || []).map(t => t?.word ?? '').join('');
       store.setTokens(episode.initialTokens);
       store.setLiveText(initialText);
       store.setBaseline({ text: episode.baselineText, tokens: episode.baselineTokens });

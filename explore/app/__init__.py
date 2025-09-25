@@ -92,18 +92,7 @@ def create_app(data_dir: str, index_file: str = None):
 
     # --- Logging Setup ---
     # Use a custom formatter to include extra data if we ever need structured (JSON) logs
-    class JsonFormatter(logging.Formatter):
-        def format(self, record):
-            log_record = {
-                "timestamp": self.formatTime(record, self.datefmt),
-                "level": record.levelname,
-                "name": record.name,
-                "message": record.getMessage(),
-            }
-            if hasattr(record, 'data'):
-                log_record['data'] = record.data
-            # Use orjson for fast serialization if available
-            return orjson.dumps(log_record).decode('utf-8')
+
 
     # Allow log level override via env (default INFO)
     _lv_name = os.environ.get('LOG_LEVEL') or os.environ.get('EXPLORE_LOG_LEVEL') or 'INFO'
@@ -207,10 +196,9 @@ def create_app(data_dir: str, index_file: str = None):
     from .routes.auth import init_oauth, bp as auth_bp
     google = None
     try:
-        if os.environ.get('GOOGLE_CLIENT_ID') and os.environ.get('GOOGLE_CLIENT_SECRET'):
+        if (os.environ.get('GOOGLE_CLIENT_ID') and os.environ.get('GOOGLE_CLIENT_SECRET')) or os.environ.get('FLASK_ENV') != 'development':
             google = init_oauth(app)
-        elif os.environ.get('FLASK_ENV') != 'development':
-            google = init_oauth(app)
+
     except Exception:
         google = None
     if google:
@@ -221,7 +209,7 @@ def create_app(data_dir: str, index_file: str = None):
         from .utils import build_audio_index
         audio_idx = build_audio_index(str(app.config['AUDIO_DIR']))
         app.config['AUDIO_INDEX'] = audio_idx
-    except Exception as e:
+    except Exception:
         # Non-fatal: resolver will fall back to globbing
         app.config['AUDIO_INDEX'] = {}
 
@@ -286,7 +274,7 @@ def create_app(data_dir: str, index_file: str = None):
 
     return app
 
-def init_index_manager(app, file_records=None, index_file=None, force_reindex=False, **db_kwargs):
+def init_index_manager(app, file_records=None, index_file=None, **db_kwargs):
     """Initialize the index manager with the given parameters.
     
     Args:

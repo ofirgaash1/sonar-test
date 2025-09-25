@@ -189,7 +189,7 @@ def normalize_db_words_rows(rows):
             if s_val is not None and e_val is not None:
                 s_float = float(s_val)
                 e_float = float(e_val)
-                if not (e_float > s_float):
+                if e_float <= s_float:
                     # Try to fix non-monotonic timing by finding next valid start time
                     next_s = None
                     for future in range(i + 1, n):

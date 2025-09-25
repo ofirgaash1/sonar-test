@@ -56,16 +56,6 @@ def _configure_logging():
         _LEVEL = logging.INFO
 
     # Use a custom formatter to include extra data
-    class JsonFormatter(logging.Formatter):
-        def format(self, record):
-            log_record = {
-                "timestamp": self.formatTime(record, self.datefmt),
-                "level": record.levelname,
-                "message": record.getMessage(),
-            }
-            if hasattr(record, 'data'):
-                log_record['data'] = record.data
-            return orjson.dumps(log_record).decode('utf-8')
 
     # Clear any existing handlers
     root_logger = logging.getLogger()

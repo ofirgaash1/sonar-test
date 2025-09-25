@@ -234,7 +234,7 @@ def build_new_window(words: list, start_seg: int, end_seg: int):
     return window, transcript
 
 
-def map_aligned_to_updates(new_window: list[tuple[int, str, int]], resp_words: list, offset: float, min_dur: float = 0.20) -> tuple[list[tuple[float, float, int]], int]:
+def map_aligned_to_updates(new_window: list[tuple[int, str, int]], resp_words: list, offset: float) -> tuple[list[tuple[float, float, int]], int]:
     def _norm(val):
         try:
             return str(val or '').strip()
@@ -391,7 +391,7 @@ def prealign_updates(
             save_alignment_artifacts('prealign', doc, int(seg_hint), ss, to, wav_bytes, align_res, transcript, request_details, src_audio_path=audio_path)
         except Exception:
             pass
-        updates, matched = map_aligned_to_updates(new_window, resp_words, ss, min_dur=0.20)
+        updates, matched = map_aligned_to_updates(new_window, resp_words, ss)
         utils.log_info(f"[ALIGN] prealign mapping: new_seq={len(new_window)} resp_seq={len(resp_words)} matched={matched} updates={len(updates)}")
         if matched == 0:
             raise RuntimeError('prealign-skip:no-match')

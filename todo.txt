@@ -33,7 +33,7 @@
 - DONE explore/app/routes/main.py
 - explore/app/routes/frontend.py
 
-## JavaScript Files (30 files)
+## JavaScript Files (26 files)
 - DONE v2/ui/controls.js
 - DONE v2/main.js
 - DONE v2/editor/pipeline.js
@@ -47,8 +47,6 @@
 - DONE v2/ui/layout.js
 - DONE v2/history/show-layers.js
 - DONE v2/ui/toast.js
-- DONE workers/diff-core.js
-- DONE workers/align-worker.js
 - DONE v2/workers/init.js
 - DONE v2/ui/theme.js
 - DONE v2/ui/merge-modal.js
@@ -85,7 +83,6 @@
 - explore/app/services/requirements.txt
 - DONE docker-compose.yml
 - DONE Dockerfile
-- DONE playwright.config.ts
 
 ## Other Important Files
 - explore/routes.txt

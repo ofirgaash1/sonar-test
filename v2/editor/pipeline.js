@@ -78,7 +78,15 @@ export function setupEditorPipeline(els, { workers, virtualizer, getDocKey, edit
     }
   }, 300);
 
-  els.transcript.addEventListener('input', () => { if (composing) return; editGenRef.value++; setTypingQuietUntil(nowMs() + 1200); hideLayers(); pushLiveText(); scheduleDiffSync(); scheduleTokensFromText(); });
+  els.transcript.addEventListener('input', () => {
+    if (composing) return;
+    editGenRef.value++;
+    setTypingQuietUntil(nowMs() + 1200);
+    hideLayers();
+    pushLiveText();
+    scheduleDiffSync();
+    scheduleTokensFromText();
+  });
 
   pushLiveText();
 

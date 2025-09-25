@@ -171,7 +171,7 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
   if (els.dlVtt) {
     els.dlVtt.addEventListener('click', () => {
       const st = getState();
-      const tokens = st.tokens && st.tokens.length ? st.tokens : (st.baselineTokens || []);
+const tokens = st.tokens?.length ? st.tokens : st.baselineTokens ?? [];
       if (!tokens || !tokens.length) { showToast('אין נתונים לייצוא', 'error'); return; }
       const vtt = generateVTT(tokens);
       const folder = els.transcript?.dataset.folder || 'episode';
@@ -201,27 +201,37 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
     const measure = (node, off) => { const rng = document.createRange(); rng.selectNodeContents(container); try { rng.setEnd(node, off); } catch { return 0; } return rng.toString().length; };
     const s = measure(r.startContainer, r.startOffset); const e = measure(r.endContainer, r.endOffset); return [Math.min(s,e), Math.max(s,e)];
   };
-  const mayConfirmNow = async () => { const st = getState(); if (!st || !(st.version > 0) || !st.base_sha256) return false; try { const txt = canonicalizeText(st.liveText||''); const h = await api.api.sha256Hex(txt); return !!h && h === st.base_sha256; } catch { return false; } };
+  const mayConfirmNow = async () => {
+    const st = getState();
+    if (!st || st.version <= 0 || !st.base_sha256) return false;
+    try {
+      const txt = canonicalizeText(st.liveText||'');
+      const h = await api.api.sha256Hex(txt);
+      return !!h && h === st.base_sha256;
+    } catch {
+      return false;
+    }
+  };
   const waitForConfirmable = async (timeoutMs = 2500) => {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
-      if (!saving) {
-        const ok = await mayConfirmNow();
-        if (ok) return true;
-      }
-      await new Promise(r => setTimeout(r, 100));
-    }
-    return false;
-  };
-  const persistConfirmations = async () => {
-    const st = getState();
-    if (!(st?.version > 0)) return;
-    try {
-      const txt = canonicalizeText(st.liveText||'');
-      const ranges = (st.confirmedRanges || []).map(x => x.range);
-      const filePath = `${els.transcript?.dataset.folder}/${els.transcript?.dataset.file}`;
-      await api.saveConfirmations(filePath, st.version, st.base_sha256 || '', ranges, txt);
-      // Round-trip reload to ensure persistence and normalize server state
+if (st?.version <= 0) return;
+try {
+  const txt = canonicalizeText(st.liveText||'');
+  const ranges = (st.confirmedRanges || []).map(x => x.range);
+  const filePath = `${els.transcript?.dataset.folder}/${els.transcript?.dataset.file}`;
+  await api.saveConfirmations(filePath, st.version, st.base_sha256 || '', ranges, txt);
+  // Round-trip reload to ensure persistence and normalize server state
+  try {
+    const confs = await api.getConfirmations(filePath, st.version);
+    const norm = (confs || []).map(c => ({ id: c.id, range: c.range }));
+    store.setConfirmedRanges(norm);
+  } catch { /* ignore reload error */ }
+  showToast('�������������� ����������', 'success');
+} catch (e) {
+  console.warn('Persist confirmations failed:', e);
+  showToast('���������� �������������� ����������', 'error');
+}
       try {
         const confs = await api.getConfirmations(filePath, st.version);
         const norm = (confs || []).map(c => ({ id: c.id, range: c.range }));
@@ -278,7 +288,14 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
     } catch {}
     if (ok || await waitForConfirmable(2500)) { try { await persistConfirmations(); } catch {} }
   });
-  document.addEventListener('selectionchange', () => { const sel = window.getSelection(); if (!sel || sel.rangeCount === 0) return; const n = sel.getRangeAt(0).commonAncestorContainer; if (els.transcript === n || (n && els.transcript.contains(n))) refreshConfirmButtons(); });
+  document.addEventListener('selectionchange', () => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    const n = sel.getRangeAt(0).commonAncestorContainer;
+    if (els.transcript === n || (n && els.transcript.contains(n))) {
+      refreshConfirmButtons();
+    }
+  });
   store.subscribe((_, tag) => { if (tag === 'confirmedRanges') refreshConfirmButtons(); });
 
   // Back to top
@@ -306,21 +323,6 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
       els.submitBtn.textContent = '⬆️ שמור תיקון';
     }
   };
-  // Build words array directly from current tokens, preserving timings/probabilities/newlines.
-  function buildWordsForSaveFromTokens(tokens) {
-    const out = [];
-    const src = Array.isArray(tokens) ? tokens : [];
-    for (const t of src) {
-      if (!t || t.state === 'del') continue;
-      const w = String(t.word || '');
-      const obj = { word: w };
-      const s = +t.start; if (Number.isFinite(s)) obj.start = s;
-      const e = +t.end;   if (Number.isFinite(e)) obj.end = e;
-      const p = +t.probability; if (Number.isFinite(p)) obj.probability = p;
-      out.push(obj);
-    }
-    return out;
-  }
 
   // Legacy helper: build words from plain text while attempting to carry timings from source tokens when possible.
   function buildWordsForSaveFromText(text) {
@@ -370,7 +372,9 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
   }
   function getSelectionOffsets(container) {
     try {
-      const sel = window.getSelection(); if (!sel || sel.rangeCount === 0) return null; const r = sel.getRangeAt(0);
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return null;
+      const r = sel.getRangeAt(0);
       const inC = n => n && (n === container || container.contains(n)); if (!(inC(r.startContainer) && inC(r.endContainer))) return null;
       const measure = (node, off) => { const rng = document.createRange(); rng.selectNodeContents(container); try { rng.setEnd(node, off); } catch { return 0; } return rng.toString().length; };
       const s = measure(r.startContainer, r.startOffset); const e = measure(r.endContainer, r.endOffset); return [Math.min(s, e), Math.max(s, e)];
@@ -383,7 +387,10 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
     for (let i = 0; i < tokens.length; i++) {
       const t = tokens[i];
       if (!t || t.state === 'del') continue;
-      if (t.word === '\n') { if ((abs[i] || 0) <= (caretOffset || 0)) seg++; continue; }
+      if (t.word === '\n') {
+        if ((abs[i] || 0) <= (caretOffset || 0)) seg++;
+        continue;
+      }
       const startChar = abs[i] || 0;
       const endChar = startChar + (t.word ? t.word.length : 0);
       if ((caretOffset || 0) < endChar) break;
@@ -472,7 +479,7 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
     } catch { return next; }
   };
   async function performSave() {
-    if (saving) return; const st = getState(); const tokens = st.tokens && st.tokens.length ? st.tokens : (st.baselineTokens || []);
+    if (saving) return; const st = getState(); const tokens = st.tokens?.length ? st.tokens : (st.baselineTokens || []);
     if (!tokens.length) { showToast('אין מה לשמור', 'error'); setSaveButton('idle'); saveQueued = false; return; }
     let text = canonicalizeText(st.liveText || ''); if (!text) text = canonicalizeText(tokens.map(t => t.word || '').join(''));
     const folder = els.transcript?.dataset.folder; const file = els.transcript?.dataset.file; if (!folder || !file) { showToast('לא נבחר קובץ', 'error'); setSaveButton('idle'); saveQueued = false; return; }
@@ -568,7 +575,7 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
             }, 12000);
             try {
               const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-              const ar = await api.alignSegment(filePath, { version: childV, segment: segHint, neighbors: 1 });
+              const ar = await api?.alignSegment(filePath, { version: childV, segment: segHint, neighbors: 1 });
               const t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
               const w = statsCopy.words || 0; const sec = statsCopy.seconds || 0;
               dbg(`[dbg] align:resp ok=${!!(ar&&ar.ok)} changed=${+ar?.changed_count||0} total=${+ar?.total_compared||0}`);
@@ -640,7 +647,7 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
           const parentText = canonicalizeText(parent?.text || parentTextSnapshot || '');
           if (parentText) {
           // Optional: save edit ops history via backend if available (handled server-side on save)
-          const { diffs } = await workers.diff.send(parentText, text, { timeoutSec: 0.8, editCost: 8 });
+          await workers.diff.send(parentText, text, { timeoutSec: 0.8, editCost: 8 });
           // Server already records deltas; client-side persistence optional and omitted.
           }
         }
@@ -652,7 +659,7 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
       try {
         const vRes = await verifyChainHash(filePath);
         if (vRes && vRes.ok) {
-          const short = (vRes.expected || '').slice(0, 8);
+          const short = vRes.expected?.slice(0, 8) || '';
           showToast(`אימות גרסה הצליח (hash ${short})`, 'success');
         } else if (vRes) {
           if (vRes.reason === 'no-version') {
@@ -666,8 +673,8 @@ export function setupUIControls(els, { workers, mergeModal }, virtualizer, playe
           } else if (vRes.reason === 'exception') {
             showToast(`אימות גרסה נכשל: ${vRes.message || 'שגיאה'}`, 'error');
           } else {
-            const got = (vRes.got || '').slice(0, 8);
-            const exp = (vRes.expected || '').slice(0, 8);
+            const got = vRes.got?.slice(0, 8) || '';
+            const exp = vRes.expected?.slice(0, 8) || '';
             showToast(`אי-תאמה בגיבוב: ${got} ≠ ${exp}`, 'error');
             try {
               const { renderHashMismatch } = await import("./merge-modal.js");

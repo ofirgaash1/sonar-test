@@ -24,7 +24,7 @@ function toTokens(s) {
     return String(s || '').match(re) || [];
   } catch {
     // Fallback when Unicode properties unsupported
-    return String(s || '').match(/\s+|\w+|\W/gu) || [];
+    return [];
   }
 }
 
@@ -68,7 +68,7 @@ function charDiffStrings(aStr, bStr, dbgTag) {
 
 async function dmpDiffStrings(aStr, bStr, dbgTag) {
   try {
-    const { diff_match_patch, DIFF_DELETE, DIFF_INSERT, DIFF_EQUAL } = await import('https://esm.sh/diff-match-patch@1.0.5');
+    const { diff_match_patch, DIFF_DELETE, DIFF_INSERT } = await import('https://esm.sh/diff-match-patch@1.0.5');
     const dmp = new diff_match_patch();
     // Tune a little for responsiveness
     dmp.Diff_Timeout = 1.0;
@@ -78,7 +78,14 @@ async function dmpDiffStrings(aStr, bStr, dbgTag) {
     const mapped = [];
     for (const [op, s] of diffs) {
       if (!s) continue;
-      const code = (op === DIFF_INSERT) ? 1 : (op === DIFF_DELETE ? -1 : 0);
+      let code;
+      if (op === DIFF_INSERT) {
+        code = 1;
+      } else if (op === DIFF_DELETE) {
+        code = -1;
+      } else {
+        code = 0;
+      }
       if (mapped.length && mapped[mapped.length-1][0] === code) mapped[mapped.length-1][1] += s; else mapped.push([code, s]);
     }
     if (dbgTag) {

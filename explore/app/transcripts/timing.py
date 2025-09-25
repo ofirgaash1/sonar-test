@@ -265,13 +265,12 @@ def _assign_from_prev(prev_tokens: List[_PrevToken], words: list) -> tuple[list,
         if match and match.kind == 'word':
             # Only assign timing data if it's actually missing (None or empty string)
             # Do NOT treat 0.0 as missing - it might be legitimate timing data
-            if enriched.get('start') in (None, ''):
-                if match.start is not None:
-                    enriched['start'] = match.start
-                    assigned += 1
-            if enriched.get('end') in (None, ''):
-                if match.end is not None:
-                    enriched['end'] = match.end
+            if enriched.get('start') in (None, '') and match.start is not None:
+                enriched['start'] = match.start
+                assigned += 1
+            if enriched.get('end') in (None, '') and match.end is not None:
+                enriched['end'] = match.end
+
             if enriched.get('probability') in (None, '') and match.prob is not None:
                 enriched['probability'] = match.prob
             last_valid_end = enriched.get('end', last_valid_end) or last_valid_end

@@ -81,8 +81,8 @@ export function markCorrection(filePath) {
 // ---- Path helpers (dataset path normalization only) ----
 function normPaths(folder, file) {
   const audioPath = `${folder}/${file}`;
-  const trPath = `${folder}/${file.replace(/\.opus$/i, '')}/full_transcript.json.gz`;
-  return { audioPath, trPath };
+
+  return { audioPath };
 }
 
 // ---- Crypto helpers (SHA-256 hex) ----
@@ -269,7 +269,7 @@ function flattenToTokens(d) {
         lastEnd = end;
       }
       // Add space token if word has trailing space
-      if (word.match(/\s+$/)) {
+      if (/\s+$/.exec(word)) {
         toks.push({ word: ' ', start: lastEnd, end: lastEnd, probability: NaN });
       }
     });
@@ -531,7 +531,7 @@ export async function saveConfirmations(filePath, version, base_sha256, ranges, 
  */
 export async function loadEpisode({ folder, file }) {
   if (!folder || !file) throw new Error('loadEpisode: folder and file are required');
-  const { audioPath, trPath } = normPaths(folder, file);
+  const { audioPath } = normPaths(folder, file);
 
   // 1) Try latest versioned transcript first (if available)
   let latestVersion = null;
