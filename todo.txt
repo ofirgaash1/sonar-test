@@ -47,13 +47,13 @@
 - DONE v2/ui/layout.js
 - DONE v2/history/show-layers.js
 - DONE v2/ui/toast.js
-- workers/diff-core.js
-- workers/align-worker.js
+- DONE workers/diff-core.js
+- DONE workers/align-worker.js
 - DONE v2/workers/init.js
 - DONE v2/ui/theme.js
 - DONE v2/ui/merge-modal.js
 - DONE v2/ui/hud.js
-- v2/shared/protocol.js
+- DONE v2/shared/protocol.js
 - DONE v2/shared/canonical.js
 - DONE v2/render/virtualizer.js
 - DONE v2/render/overlay.js
@@ -66,26 +66,26 @@
 - DONE explore/app/static/js/results.js
 
 ## TypeScript Files (3 files)
-- e2e/editor.spec.ts
-- playwright.config.ts
-- e2e/save.spec.ts
+- DONE e2e/editor.spec.ts
+- DONE playwright.config.ts
+- DONE e2e/save.spec.ts
 
 ## Shell Scripts (2 files)
-- dev.sh
-- explore/start.sh
+- DONE dev.sh
+- DONE explore/start.sh
 
 ## Batch Files (1 file)
 - open-v2.cmd
 
 ## Configuration Files
-- package.json
+- DONE package.json
 - package-lock.json
 - requirements-dev.txt
 - explore/requirements.txt
 - explore/app/services/requirements.txt
-- docker-compose.yml
-- Dockerfile
-- playwright.config.ts
+- DONE docker-compose.yml
+- DONE Dockerfile
+- DONE playwright.config.ts
 
 ## Other Important Files
 - explore/routes.txt

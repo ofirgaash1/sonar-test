@@ -1261,7 +1261,134 @@ The frontend is built as a sophisticated single-page application with the follow
 4. **Performance Testing**: Timing data monotonicity validation
 5. **Conflict Testing**: Concurrent edit scenario testing
 
+## Additional Components and Infrastructure
+
+### Worker Implementation (Advanced)
+
+**`workers/align-worker.js`** - Advanced alignment worker for timing preservation.
+
+**Key Features:**
+- **Token Alignment**: Aligns edited text back to timing-bearing tokens
+- **LCS Algorithm**: Uses Longest Common Subsequence for optimal alignment
+- **Timing Assignment**: Assigns timing to inserted tokens using anchor windows
+- **Monotonicity Enforcement**: Ensures timing data remains monotonic
+- **Whitespace Handling**: Special handling for whitespace tokens as zero-length anchors
+
+**Algorithm Details:**
+- **Baseline Normalization**: Splits whitespace into zero-length anchors
+- **Anchor Windowing**: Uses surrounding tokens to determine timing windows
+- **Insertion Timing**: Distributes timing across inserted word sequences
+- **Global Monotonicity**: Enforces non-decreasing start times across all tokens
+
+**`v2/shared/protocol.js`** - Shared message protocol definitions.
+
+**Key Features:**
+- **Worker Communication**: Defines message types for diff and align workers
+- **Edit Operations**: Standardized edit operation codes (DELETE, EQUAL, INSERT)
+- **Type Definitions**: JSDoc typedefs for Token, ConfirmationRange, VersionMeta
+- **Dependency-Free**: Minimal shared definitions without external dependencies
+
+### Development and Deployment
+
+**`dev.sh`** - Development server startup script.
+
+**Key Features:**
+- **Virtual Environment**: Activates Python virtual environment if present
+- **Argument Parsing**: Supports custom data directory and dev mode flags
+- **Error Handling**: Validates Python installation and provides clear error messages
+- **Flexible Configuration**: Allows both development and production modes
+
+**`package.json`** - Node.js project configuration for E2E testing.
+
+**Key Features:**
+- **Playwright Testing**: E2E testing framework with browser automation
+- **TypeScript Support**: Type definitions for Node.js
+- **Crypto Dependencies**: SHA-256 hashing for data integrity
+- **Script Commands**: Standardized testing commands with different modes
+
+### Containerization
+
+**`Dockerfile`** - Multi-stage Docker build for production deployment.
+
+**Key Features:**
+- **Multi-Stage Build**: Optimized build process with separate builder and runtime stages
+- **Python 3.11**: Modern Python runtime with slim base image
+- **FFmpeg Integration**: Includes FFmpeg for audio processing and alignment
+- **Virtual Environment**: Isolated Python dependencies
+- **Gunicorn WSGI**: Production WSGI server with proper configuration
+
+**`docker-compose.yml`** - Docker Compose configuration for development.
+
+**Key Features:**
+- **Development Environment**: Hot-reload code and static files
+- **Volume Mounting**: Live data access and code synchronization
+- **Environment Variables**: Development-specific configuration
+- **Port Mapping**: Exposes Flask application on port 5000
+
+## Final Analysis Summary
+
+### Repository Overview
+The `sonar-test` repository is a sophisticated transcript management and search system built with modern web technologies. It combines a Flask backend with a cutting-edge JavaScript frontend to provide a comprehensive solution for Hebrew transcript editing, search, and audio synchronization.
+
+### Key Strengths
+
+1. **Data Integrity Focus**: The system places exceptional emphasis on data integrity, with explicit warnings against generating artificial timing data and comprehensive validation mechanisms.
+
+2. **Advanced Diff Algorithms**: Implements sophisticated diff algorithms including Myers O(ND) algorithm with multi-level processing (character, token, and line-level).
+
+3. **Real-time Collaboration**: Features conflict detection and resolution for concurrent edits with hash-based version control.
+
+4. **Performance Optimization**: Uses virtual scrolling, web workers, batch processing, and lazy loading to handle large datasets efficiently.
+
+5. **Comprehensive Testing**: Extensive E2E testing with Playwright, including timing data integrity validation and monotonicity checks.
+
+6. **Production Ready**: Full containerization with Docker, production deployment scripts, and comprehensive logging.
+
+### Technical Architecture
+
+**Backend (Flask)**:
+- Modular blueprint-based architecture
+- SQLite with WAL mode and custom UDFs
+- Google OAuth authentication
+- PostHog analytics integration
+- External alignment service integration
+- Comprehensive error handling and logging
+
+**Frontend (JavaScript)**:
+- Modern ES6 module architecture
+- Centralized reactive state management
+- Virtual scrolling for performance
+- Web workers for CPU-intensive tasks
+- Real-time conflict resolution
+- Responsive design with resizable panels
+
+### Critical Design Principles
+
+1. **No Artificial Data**: Explicitly avoids generating fake timing data
+2. **Hash Verification**: Multiple layers of SHA-256 verification
+3. **Version Control**: Comprehensive versioning with edit deltas
+4. **Monotonicity**: Strict enforcement of timing data monotonicity
+5. **Error Transparency**: Fails fast to expose bugs rather than hiding them
+
+### Quality Assurance
+
+The system includes comprehensive quality assurance measures:
+- E2E testing with browser automation
+- Timing data integrity validation
+- Hash chain verification
+- Conflict resolution testing
+- Performance monitoring
+- Error detection and logging
+
+### Deployment and Operations
+
+- Production-ready Docker containerization
+- Development environment with hot-reload
+- Comprehensive logging and monitoring
+- Health checks and error reporting
+- Scalable architecture with worker processes
+
 ---
 
-*This README provides a comprehensive overview of the sonar-test repository, covering both the backend Flask application and the frontend JavaScript application. The analysis reveals a sophisticated system for transcript management, search, and editing with strong emphasis on data integrity, performance, and user experience.*
+*This README provides a comprehensive overview of the sonar-test repository, covering both the backend Flask application and the frontend JavaScript application. The analysis reveals a sophisticated system for transcript management, search, and editing with strong emphasis on data integrity, performance, and user experience. The repository demonstrates excellent software engineering practices with comprehensive testing, documentation, and production-ready deployment infrastructure.*
 
